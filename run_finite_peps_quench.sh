@@ -42,7 +42,7 @@ echo ""
 # ── Run ───────────────────────────────────────────────────────────────────────
 julia --project="${REPO_DIR}" \
       --threads=${JULIA_NUM_THREADS} \
-      "${REPO_DIR}/finite_peps_quench.jl"
+      "${REPO_DIR}/LGT/finite_peps_quench.jl"
 
 EXIT_CODE=$?
 
@@ -54,6 +54,6 @@ echo "========================================================================"
 
 echo ""
 echo "Output files:"
-ls -lh "${REPO_DIR}"/finite_peps_quench_* 2>/dev/null || echo "  (none found)"
+ls -lh "${REPO_DIR}/LGT"/finite_peps_quench_* 2>/dev/null || echo "  (none found)"
 
 exit ${EXIT_CODE}
