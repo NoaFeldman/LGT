@@ -443,8 +443,8 @@ function run_quench_B(;
                              τ_ite=τ_ite, n_ite=n_ite)
 
     obs0 = measure_all_finite(peps, nx, ny, dg, 0.0)
-    @printf("\n  GS at m=$m_init:  ⟨n_f⟩=%.4f  ⟨n_f⟩_e=%.4f  ⟨n_f⟩_o=%.4f  ⟨E²⟩=%.4f\n",
-            obs0.nf_mean, obs0.nf_even, obs0.nf_odd, obs0.E2_mean)
+    @printf("\n  GS at m=%g:  ⟨n_f⟩=%.4f  ⟨n_f⟩_e=%.4f  ⟨n_f⟩_o=%.4f  ⟨E²⟩=%.4f\n",
+            m_init, obs0.nf_mean, obs0.nf_even, obs0.nf_odd, obs0.E2_mean)
 
     println("\n  Evolving with m = $m_final...")
     data = evolve!(peps, nx, ny, dg;
@@ -491,8 +491,8 @@ function run_quench_C(;
                              τ_ite=τ_ite, n_ite=n_ite)
 
     obs0 = measure_all_finite(peps, nx, ny, dg, 0.0)
-    @printf("\n  GS at g=$g_init:  ⟨n_f⟩=%.4f  ⟨E²⟩=%.4f  S_mean=%.4f\n",
-            obs0.nf_mean, obs0.E2_mean, obs0.S_mean)
+    @printf("\n  GS at g=%g:  ⟨n_f⟩=%.4f  ⟨E²⟩=%.4f  S_mean=%.4f\n",
+            g_init, obs0.nf_mean, obs0.E2_mean, obs0.S_mean)
 
     println("\n  Evolving with g = $g_final...")
     data = evolve!(peps, nx, ny, dg;
