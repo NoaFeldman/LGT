@@ -40,6 +40,10 @@ echo "========================================================================"
 echo ""
 
 # ── Run ───────────────────────────────────────────────────────────────────────
+echo "Instantiating project environment..."
+julia --project="${REPO_DIR}" -e 'import Pkg; Pkg.instantiate(); Pkg.precompile()'
+
+echo "Running finite_peps_quench.jl..."
 julia --project="${REPO_DIR}" \
       --threads=${JULIA_NUM_THREADS} \
       "${REPO_DIR}/finite_peps_quench.jl"
