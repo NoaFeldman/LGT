@@ -715,14 +715,31 @@ function H_hop_v_site(ix::Int, iy::Int, nx::Int, ny::Int, dg::Int; t::Float64)
 end
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  Finite-lattice merged 2-site Hamiltonians  (¼ on-site folded in)       ║
+# ║  Finite-lattice merged 2-site Hamiltonians  (boundary-corrected)        ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
+
+"""
+    _onsite_weight(ix, iy, nx, ny) → Float64
+
+Weight for the on-site energy of site (ix,iy) in each bond Hamiltonian.
+Each site participates in `num_bonds` bonds; summing 1/num_bonds over all bonds
+gives exactly 1, so the full on-site energy is applied exactly once per Trotter step.
+This corrects the boundary under-counting that occurs when using the naive 1/4 weight:
+corner sites (2 bonds) would otherwise receive only 50%, edge sites (3 bonds) 75%.
+"""
+function _onsite_weight(ix::Int, iy::Int, nx::Int, ny::Int)
+    nb = (ix > 1 ? 1 : 0) + (ix < nx ? 1 : 0) + (iy > 1 ? 1 : 0) + (iy < ny ? 1 : 0)
+    return 1.0 / nb
+end
 
 """
     H_merged_h_site(ix, iy, nx, ny, dg; g, t, m)
 
 Horizontal merged Hamiltonian for the bond (ix,iy)—(ix+1,iy):
-    H_hop_h_site + ¼ H_onsite_L ⊗ I + ¼ I ⊗ H_onsite_R
+    H_hop_h_site + αL·H_onsite_L ⊗ I + αR·I ⊗ H_onsite_R
+
+αL = 1/num_bonds(ix,iy), αR = 1/num_bonds(ix+1,iy), ensuring each site's
+on-site energy is counted exactly once summed over all bonds it belongs to.
 """
 function H_merged_h_site(ix::Int, iy::Int, nx::Int, ny::Int, dg::Int;
                           g::Float64, t::Float64, m::Float64)
@@ -733,14 +750,18 @@ function H_merged_h_site(ix::Int, iy::Int, nx::Int, ny::Int, dg::Int;
     Hos_L = H_onsite_site(ix,   iy, nx, ny, dg; g=g, m=m)
     Hos_R = H_onsite_site(ix+1, iy, nx, ny, dg; g=g, m=m)
     Hh    = H_hop_h_site(ix, iy, nx, ny, dg; t=t)
-    return Hh .+ 0.25 .* (kron(Hos_L, Idn_R) .+ kron(Idn_L, Hos_R))
+    αL = _onsite_weight(ix,   iy, nx, ny)
+    αR = _onsite_weight(ix+1, iy, nx, ny)
+    return Hh .+ αL .* kron(Hos_L, Idn_R) .+ αR .* kron(Idn_L, Hos_R)
 end
 
 """
     H_merged_v_site(ix, iy, nx, ny, dg; g, t, m)
 
 Vertical merged Hamiltonian for the bond (ix,iy)—(ix,iy+1):
-    H_hop_v_site + ¼ H_onsite_D ⊗ I + ¼ I ⊗ H_onsite_U
+    H_hop_v_site + αD·H_onsite_D ⊗ I + αU·I ⊗ H_onsite_U
+
+αD = 1/num_bonds(ix,iy), αU = 1/num_bonds(ix,iy+1).
 """
 function H_merged_v_site(ix::Int, iy::Int, nx::Int, ny::Int, dg::Int;
                           g::Float64, t::Float64, m::Float64)
@@ -751,7 +772,9 @@ function H_merged_v_site(ix::Int, iy::Int, nx::Int, ny::Int, dg::Int;
     Hos_D = H_onsite_site(ix, iy,   nx, ny, dg; g=g, m=m)
     Hos_U = H_onsite_site(ix, iy+1, nx, ny, dg; g=g, m=m)
     Hv    = H_hop_v_site(ix, iy, nx, ny, dg; t=t)
-    return Hv .+ 0.25 .* (kron(Hos_D, Idn_U) .+ kron(Idn_D, Hos_U))
+    αD = _onsite_weight(ix, iy,   nx, ny)
+    αU = _onsite_weight(ix, iy+1, nx, ny)
+    return Hv .+ αD .* kron(Hos_D, Idn_U) .+ αU .* kron(Idn_D, Hos_U)
 end
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
