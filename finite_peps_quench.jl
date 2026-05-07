@@ -56,8 +56,8 @@ default(
 const QNX      = 3        # lattice columns  → QNX-1 = 2 horizontal plaquettes
 const QNY      = 4        # lattice rows     → QNY-1 = 3 vertical plaquettes
 const QDG      = 1        # gauge truncation |e| ≤ 1
-const QD_BOND  = 2        # initial virtual bond dimension
-const QD_MAX   = 6        # max bond dimension during quench
+const QD_BOND  = 4        # initial virtual bond dimension
+const QD_MAX   = 12       # max bond dimension during quench
 
 const QG_COUP  = 1.0      # default coupling g
 const QT_HOP   = 1.0      # default hopping t
@@ -364,6 +364,7 @@ end
 function run_quench_A(;
         nx = QNX, ny = QNY, dg = QDG, D_bond = QD_BOND, D_max = QD_MAX,
         g::Float64 = QG_COUP, t_hop::Float64 = QT_HOP, m::Float64 = QM_MASS,
+        results_dir::String = "results",
         dt::Float64 = 0.02, n_steps::Int = 200,
         label::String = "finite_peps_quench_A")
 
@@ -404,13 +405,14 @@ function run_quench_A(;
                    g=g, t_hop=t_hop, m=m, dt=dt, n_steps=n_steps, D_trunc=D_max)
 
     df = data_to_df(data)
-    CSV.write("$(label)_data.csv", df)
-    println("\n  Saved: $(label)_data.csv")
+    CSV.write(joinpath(results_dir, "$(label)_data.csv"), df)
+    println("\n  Saved: $(results_dir)/$(label)_data.csv")
 
     plot_quench(df;
                 title="Quench A: String Breaking  ($(nx)×$(ny), m=$m)",
-                prefix=label)
-    save_final_snapshot(peps, nx, ny, dg, data[end].t, "$(label)_final.txt")
+                prefix=joinpath(results_dir, label))
+    save_final_snapshot(peps, nx, ny, dg, data[end].t,
+                        joinpath(results_dir, "$(label)_final.txt"))
 
     return data
 end
@@ -429,7 +431,8 @@ function run_quench_B(;
         m_init::Float64 = 5.0, m_final::Float64 = 0.1,
         τ_ite::Float64 = 0.05, n_ite::Int = 300,
         dt::Float64 = 0.02, n_steps::Int = 200,
-        label::String = "finite_peps_quench_B")
+        label::String = "finite_peps_quench_B",
+        results_dir::String = "results")
 
     println("=" ^ 70)
     println("  QUENCH B: Mass Quench  m = $m_init → $m_final")
@@ -451,13 +454,14 @@ function run_quench_B(;
                    g=g, t_hop=t_hop, m=m_final, dt=dt, n_steps=n_steps, D_trunc=D_max)
 
     df = data_to_df(data)
-    CSV.write("$(label)_data.csv", df)
-    println("\n  Saved: $(label)_data.csv")
+    CSV.write(joinpath(results_dir, "$(label)_data.csv"), df)
+    println("\n  Saved: $(results_dir)/$(label)_data.csv")
 
     plot_quench(df;
                 title="Quench B: Mass Quench m=$m_init → $m_final  ($(nx)×$(ny))",
-                prefix=label)
-    save_final_snapshot(peps, nx, ny, dg, data[end].t, "$(label)_final.txt")
+                prefix=joinpath(results_dir, label))
+    save_final_snapshot(peps, nx, ny, dg, data[end].t,
+                        joinpath(results_dir, "$(label)_final.txt"))
 
     return data
 end
@@ -477,7 +481,8 @@ function run_quench_C(;
         g_init::Float64 = 2.0, g_final::Float64 = 0.5,
         τ_ite::Float64 = 0.05, n_ite::Int = 300,
         dt::Float64 = 0.02, n_steps::Int = 200,
-        label::String = "finite_peps_quench_C")
+        label::String = "finite_peps_quench_C",
+        results_dir::String = "results")
 
     println("=" ^ 70)
     println("  QUENCH C: Coupling Quench  g = $g_init → $g_final")
@@ -499,13 +504,14 @@ function run_quench_C(;
                    g=g_final, t_hop=t_hop, m=m, dt=dt, n_steps=n_steps, D_trunc=D_max)
 
     df = data_to_df(data)
-    CSV.write("$(label)_data.csv", df)
-    println("\n  Saved: $(label)_data.csv")
+    CSV.write(joinpath(results_dir, "$(label)_data.csv"), df)
+    println("\n  Saved: $(results_dir)/$(label)_data.csv")
 
     plot_quench(df;
                 title="Quench C: Coupling Quench g=$g_init → $g_final  ($(nx)×$(ny))",
-                prefix=label)
-    save_final_snapshot(peps, nx, ny, dg, data[end].t, "$(label)_final.txt")
+                prefix=joinpath(results_dir, label))
+    save_final_snapshot(peps, nx, ny, dg, data[end].t,
+                        joinpath(results_dir, "$(label)_final.txt"))
 
     return data
 end
@@ -514,7 +520,8 @@ end
 # ║  Summary comparison figure                                              ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
-function plot_summary(data_A, data_B, data_C; prefix="finite_peps_quench_summary")
+function plot_summary(data_A, data_B, data_C; prefix="finite_peps_quench_summary",
+                      results_dir::String = "results")
     df_A = data_to_df(data_A)
     df_B = data_to_df(data_B)
     df_C = data_to_df(data_C)
@@ -542,8 +549,8 @@ function plot_summary(data_A, data_B, data_C; prefix="finite_peps_quench_summary
 
     fig = plot(p1, p2, p3, p4, layout=(2, 2), size=(1200, 800),
                plot_title="Finite PEPS Quenches — $(QNX)×$(QNY) lattice ($(QNX-1)×$(QNY-1) plaquettes)")
-    savefig(fig, "$(prefix).png")
-    println("  Saved: $(prefix).png")
+    savefig(fig, joinpath(results_dir, "$(prefix).png"))
+    println("  Saved: $(results_dir)/$(prefix).png")
     return fig
 end
 
@@ -558,20 +565,25 @@ function main()
     println("  dg=$(QDG)  (link dim $(gauge_dim(QDG)))  D_bond=$(QD_BOND)  D_max=$(QD_MAX)")
     println("=" ^ 70 * "\n")
 
-    data_A = run_quench_A()
+    results_dir = joinpath(@__DIR__, "results")
+    mkpath(results_dir)
+    println("  Output directory: $results_dir\n")
+
+    data_A = run_quench_A(results_dir=results_dir)
     println()
 
-    data_B = run_quench_B()
+    data_B = run_quench_B(results_dir=results_dir)
     println()
 
-    data_C = run_quench_C()
+    data_C = run_quench_C(results_dir=results_dir)
     println()
 
     println("  Generating summary comparison figure...")
-    plot_summary(data_A, data_B, data_C)
+    plot_summary(data_A, data_B, data_C; results_dir=results_dir)
 
     println("\n" * "=" ^ 70)
-    println("  DONE.  Output files:")
+    println("  DONE.  Output directory: $results_dir")
+    println("  Output files:")
     for tag in ["A", "B", "C"]
         println("    finite_peps_quench_$(tag)_data.csv")
         println("    finite_peps_quench_$(tag)_panels.png")
