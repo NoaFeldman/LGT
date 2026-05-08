@@ -559,37 +559,37 @@ end
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
 function main()
+    # Optional first argument: 1=A, 2=B, 3=C, 0/absent=all three
+    quench_id = length(ARGS) >= 1 ? parse(Int, ARGS[1]) : 0
+
     println("\n" * "=" ^ 70)
     println("  Finite PEPS Quench Benchmark")
     println("  Lattice: $(QNX)×$(QNY)  →  $(QNX-1)×$(QNY-1) plaquettes")
     println("  dg=$(QDG)  (link dim $(gauge_dim(QDG)))  D_bond=$(QD_BOND)  D_max=$(QD_MAX)")
+    quench_id > 0 && println("  Running quench $quench_id only")
     println("=" ^ 70 * "\n")
 
     results_dir = joinpath(@__DIR__, "results")
     mkpath(results_dir)
     println("  Output directory: $results_dir\n")
 
-    data_A = run_quench_A(results_dir=results_dir)
-    println()
+    if quench_id == 1 || quench_id == 0
+        run_quench_A(results_dir=results_dir)
+        println()
+    end
 
-    data_B = run_quench_B(results_dir=results_dir)
-    println()
+    if quench_id == 2 || quench_id == 0
+        run_quench_B(results_dir=results_dir)
+        println()
+    end
 
-    data_C = run_quench_C(results_dir=results_dir)
-    println()
-
-    println("  Generating summary comparison figure...")
-    plot_summary(data_A, data_B, data_C; results_dir=results_dir)
+    if quench_id == 3 || quench_id == 0
+        run_quench_C(results_dir=results_dir)
+        println()
+    end
 
     println("\n" * "=" ^ 70)
     println("  DONE.  Output directory: $results_dir")
-    println("  Output files:")
-    for tag in ["A", "B", "C"]
-        println("    finite_peps_quench_$(tag)_data.csv")
-        println("    finite_peps_quench_$(tag)_panels.png")
-        println("    finite_peps_quench_$(tag)_final.txt")
-    end
-    println("    finite_peps_quench_summary.png")
     println("=" ^ 70)
 end
 
