@@ -216,12 +216,15 @@ function update_bond_h!(peps::FinitePEPS, ix::Int, iy::Int,
     sz = size(Θ)
 
     # Apply gate:  Θ_new[p1',l,uL,dL,p2',r,uR,dR] = Σ_{p1,p2} G[p1',p2',p1,p2]*Θ[p1,l,uL,dL,p2,r,uR,dR]
-    # Reshape to (p1*p2, rest) and apply gate matrix (dp_L*dp_R × dp_L*dp_R)
-    Θ_pp = permutedims(Θ, (1, 5, 2, 3, 4, 6, 7, 8))   # (p1, p2, l, uL, dL, r, uR, dR)
-    Θ_pp_mat = reshape(Θ_pp, dp_L*dp_R, sz[2]*sz[3]*sz[4]*sz[6]*sz[7]*sz[8])
+    # Gate is built as kron(Hos_L, Idn_R) etc., where Julia's kron puts the SECOND
+    # factor on the FAST (column-major) flat axis.  We therefore put p2 (R site)
+    # first so it becomes the fast flat index; otherwise the gate's L-operator
+    # would act on the R-site tensor leg (and vice versa).
+    Θ_pp = permutedims(Θ, (5, 1, 2, 3, 4, 6, 7, 8))   # (p2, p1, l, uL, dL, r, uR, dR)
+    Θ_pp_mat = reshape(Θ_pp, dp_R*dp_L, sz[2]*sz[3]*sz[4]*sz[6]*sz[7]*sz[8])
     Θ_new_pp_mat = gate * Θ_pp_mat
-    Θ_new_pp = reshape(Θ_new_pp_mat, dp_L, dp_R, sz[2], sz[3], sz[4], sz[6], sz[7], sz[8])
-    Θ_new = permutedims(Θ_new_pp, (1, 3, 4, 5, 2, 6, 7, 8))  # (p1,l,uL,dL,p2,r,uR,dR)
+    Θ_new_pp = reshape(Θ_new_pp_mat, dp_R, dp_L, sz[2], sz[3], sz[4], sz[6], sz[7], sz[8])
+    Θ_new = permutedims(Θ_new_pp, (2, 3, 4, 5, 1, 6, 7, 8))  # (p1,l,uL,dL,p2,r,uR,dR)
 
     # SVD split
     Θ_mat = reshape(Θ_new, dp_L*sz[2]*sz[3]*sz[4], dp_R*sz[6]*sz[7]*sz[8])
@@ -318,12 +321,14 @@ function update_bond_v!(peps::FinitePEPS, ix::Int, iy::Int,
     Θ = reshape(Θ_raw, dp_D, sz_D[2], sz_D[3], sz_D[5], dp_U, sz_U[2], sz_U[3], sz_U[4])
     szΘ = size(Θ)
 
-    # Apply gate via matrix multiply on physical indices
-    Θ_pp = permutedims(Θ, (1, 5, 2, 3, 4, 6, 7, 8))   # (p1, p2, lD, rD, dD, lU, rU, uU)
-    Θ_pp_mat = reshape(Θ_pp, dp_D*dp_U, szΘ[2]*szΘ[3]*szΘ[4]*szΘ[6]*szΘ[7]*szΘ[8])
+    # Apply gate via matrix multiply on physical indices.
+    # Gate is kron(Hos_D, Idn_U) etc., which puts the U site on the FAST flat
+    # axis.  Match that by flattening (p2=U, p1=D) with p2 first.
+    Θ_pp = permutedims(Θ, (5, 1, 2, 3, 4, 6, 7, 8))   # (p2, p1, lD, rD, dD, lU, rU, uU)
+    Θ_pp_mat = reshape(Θ_pp, dp_U*dp_D, szΘ[2]*szΘ[3]*szΘ[4]*szΘ[6]*szΘ[7]*szΘ[8])
     Θ_new_pp_mat = gate * Θ_pp_mat
-    Θ_new_pp = reshape(Θ_new_pp_mat, dp_D, dp_U, szΘ[2], szΘ[3], szΘ[4], szΘ[6], szΘ[7], szΘ[8])
-    Θ_new = permutedims(Θ_new_pp, (1, 3, 4, 5, 2, 6, 7, 8))  # (p1,lD,rD,dD,p2,lU,rU,uU)
+    Θ_new_pp = reshape(Θ_new_pp_mat, dp_U, dp_D, szΘ[2], szΘ[3], szΘ[4], szΘ[6], szΘ[7], szΘ[8])
+    Θ_new = permutedims(Θ_new_pp, (2, 3, 4, 5, 1, 6, 7, 8))  # (p1,lD,rD,dD,p2,lU,rU,uU)
 
     # SVD: (p1, lD, rD, dD) | (p2, lU, rU, uU)
     Θ_mat = reshape(Θ_new, dp_D*szΘ[2]*szΘ[3]*szΘ[4], dp_U*szΘ[6]*szΘ[7]*szΘ[8])
