@@ -202,12 +202,13 @@ Run imaginary-time evolution to prepare a finite PEPS ground state.
 """
 function ite_ground_state(nx::Int, ny::Int, dg::Int, D_bond::Int, D_max::Int;
                            g::Float64, t_hop::Float64, m::Float64,
-                           τ_ite::Float64, n_ite::Int, verbose::Bool=true)
+                           τ_ite::Float64, n_ite::Int, μ::Float64=0.0,
+                           verbose::Bool=true)
     peps = init_finite_peps(nx, ny, dg, D_bond)
 
     for step in 1:n_ite
         trotter_step!(peps, nx, ny, dg; g=g, t_hop=t_hop, m=m,
-                      τ=τ_ite, D_trunc=D_max)
+                      τ=τ_ite, D_trunc=D_max, μ=μ)
 
         if verbose && (step % 100 == 0 || step == n_ite)
             nf_val = mean_nf(peps, nx, ny, dg)
@@ -429,6 +430,7 @@ function run_quench_B(;
         nx = QNX, ny = QNY, dg = QDG, D_bond = QD_BOND, D_max = QD_MAX,
         g::Float64 = QG_COUP, t_hop::Float64 = QT_HOP,
         m_init::Float64 = 5.0, m_final::Float64 = 0.1,
+        μ_ite::Float64 = 1.0,
         τ_ite::Float64 = 0.05, n_ite::Int = 300,
         dt::Float64 = 0.02, n_steps::Int = 200,
         label::String = "finite_peps_quench_B",
@@ -442,7 +444,7 @@ function run_quench_B(;
 
     println("\n  Preparing ground state at m = $m_init  ($n_ite ITE steps)...")
     peps = ite_ground_state(nx, ny, dg, D_bond, D_max;
-                             g=g, t_hop=t_hop, m=m_init,
+                             g=g, t_hop=t_hop, m=m_init, μ=μ_ite,
                              τ_ite=τ_ite, n_ite=n_ite)
 
     obs0 = measure_all_finite(peps, nx, ny, dg, 0.0)
@@ -479,6 +481,7 @@ function run_quench_C(;
         nx = QNX, ny = QNY, dg = QDG, D_bond = QD_BOND, D_max = QD_MAX,
         t_hop::Float64 = QT_HOP, m::Float64 = QM_MASS,
         g_init::Float64 = 2.0, g_final::Float64 = 0.5,
+        μ_ite::Float64 = 2.0,
         τ_ite::Float64 = 0.05, n_ite::Int = 300,
         dt::Float64 = 0.02, n_steps::Int = 200,
         label::String = "finite_peps_quench_C",
@@ -492,7 +495,7 @@ function run_quench_C(;
 
     println("\n  Preparing ground state at g = $g_init  ($n_ite ITE steps)...")
     peps = ite_ground_state(nx, ny, dg, D_bond, D_max;
-                             g=g_init, t_hop=t_hop, m=m,
+                             g=g_init, t_hop=t_hop, m=m, μ=μ_ite,
                              τ_ite=τ_ite, n_ite=n_ite)
 
     obs0 = measure_all_finite(peps, nx, ny, dg, 0.0)

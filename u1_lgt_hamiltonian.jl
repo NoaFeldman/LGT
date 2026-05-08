@@ -653,9 +653,10 @@ Single-node Hamiltonian for node (ix, iy).  Includes:
   • (g²/2) E²_R  if right link exists (ix < nx)
   • (g²/2) E²_U  if up link exists    (iy < ny)
   • m · (-1)^{ix+iy} · n_f
+  • μ · n_f   (optional chemical potential; default 0, used during ITE to pin filling)
 """
 function H_onsite_site(ix::Int, iy::Int, nx::Int, ny::Int, dg::Int;
-                        g::Float64, m::Float64)
+                        g::Float64, m::Float64, μ::Float64=0.0)
     d_phys, d_gR, d_gU = site_dims(ix, iy, nx, ny, dg)
     H = zeros(ComplexF64, d_phys, d_phys)
 
@@ -668,6 +669,9 @@ function H_onsite_site(ix::Int, iy::Int, nx::Int, ny::Int, dg::Int;
 
     stag = (iseven(ix + iy)) ? 1 : -1
     H .+= m * stag .* embed_f_site(op_nf(), d_gR, d_gU)
+    if μ != 0.0
+        H .+= μ .* embed_f_site(op_nf(), d_gR, d_gU)
+    end
 
     return 0.5 .* (H .+ H')
 end
@@ -742,13 +746,13 @@ Horizontal merged Hamiltonian for the bond (ix,iy)—(ix+1,iy):
 on-site energy is counted exactly once summed over all bonds it belongs to.
 """
 function H_merged_h_site(ix::Int, iy::Int, nx::Int, ny::Int, dg::Int;
-                          g::Float64, t::Float64, m::Float64)
+                          g::Float64, t::Float64, m::Float64, μ::Float64=0.0)
     d_phys_L, _, _ = site_dims(ix,   iy, nx, ny, dg)
     d_phys_R, _, _ = site_dims(ix+1, iy, nx, ny, dg)
     Idn_L = _Id(d_phys_L)
     Idn_R = _Id(d_phys_R)
-    Hos_L = H_onsite_site(ix,   iy, nx, ny, dg; g=g, m=m)
-    Hos_R = H_onsite_site(ix+1, iy, nx, ny, dg; g=g, m=m)
+    Hos_L = H_onsite_site(ix,   iy, nx, ny, dg; g=g, m=m, μ=μ)
+    Hos_R = H_onsite_site(ix+1, iy, nx, ny, dg; g=g, m=m, μ=μ)
     Hh    = H_hop_h_site(ix, iy, nx, ny, dg; t=t)
     αL = _onsite_weight(ix,   iy, nx, ny)
     αR = _onsite_weight(ix+1, iy, nx, ny)
@@ -764,13 +768,13 @@ Vertical merged Hamiltonian for the bond (ix,iy)—(ix,iy+1):
 αD = 1/num_bonds(ix,iy), αU = 1/num_bonds(ix,iy+1).
 """
 function H_merged_v_site(ix::Int, iy::Int, nx::Int, ny::Int, dg::Int;
-                          g::Float64, t::Float64, m::Float64)
+                          g::Float64, t::Float64, m::Float64, μ::Float64=0.0)
     d_phys_D, _, _ = site_dims(ix, iy,   nx, ny, dg)
     d_phys_U, _, _ = site_dims(ix, iy+1, nx, ny, dg)
     Idn_D = _Id(d_phys_D)
     Idn_U = _Id(d_phys_U)
-    Hos_D = H_onsite_site(ix, iy,   nx, ny, dg; g=g, m=m)
-    Hos_U = H_onsite_site(ix, iy+1, nx, ny, dg; g=g, m=m)
+    Hos_D = H_onsite_site(ix, iy,   nx, ny, dg; g=g, m=m, μ=μ)
+    Hos_U = H_onsite_site(ix, iy+1, nx, ny, dg; g=g, m=m, μ=μ)
     Hv    = H_hop_v_site(ix, iy, nx, ny, dg; t=t)
     αD = _onsite_weight(ix, iy,   nx, ny)
     αU = _onsite_weight(ix, iy+1, nx, ny)

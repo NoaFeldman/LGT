@@ -375,24 +375,24 @@ Order: [h-half-forward] → [v-full-forward] → [h-half-backward]
 """
 function trotter_step!(peps::FinitePEPS, nx::Int, ny::Int, dg::Int;
                         g::Float64, t_hop::Float64, m::Float64,
-                        τ::Float64, D_trunc::Int)
+                        τ::Float64, D_trunc::Int, μ::Float64=0.0)
     # ── Horizontal half-step (left to right sweep) ────────────────────────
     for iy in 1:ny, ix in 1:nx-1
-        Hh = H_merged_h_site(ix, iy, nx, ny, dg; g=g, t=t_hop, m=m)
+        Hh = H_merged_h_site(ix, iy, nx, ny, dg; g=g, t=t_hop, m=m, μ=μ)
         gate = exp(-(τ / 2) .* Hh)
         update_bond_h!(peps, ix, iy, gate, D_trunc)
     end
 
     # ── Vertical full-step (bottom to top sweep) ──────────────────────────
     for iy in 1:ny-1, ix in 1:nx
-        Hv = H_merged_v_site(ix, iy, nx, ny, dg; g=g, t=t_hop, m=m)
+        Hv = H_merged_v_site(ix, iy, nx, ny, dg; g=g, t=t_hop, m=m, μ=μ)
         gate = exp(-τ .* Hv)
         update_bond_v!(peps, ix, iy, gate, D_trunc)
     end
 
     # ── Horizontal half-step (right to left sweep, for symmetry) ─────────
     for iy in 1:ny, ix in nx-1:-1:1
-        Hh = H_merged_h_site(ix, iy, nx, ny, dg; g=g, t=t_hop, m=m)
+        Hh = H_merged_h_site(ix, iy, nx, ny, dg; g=g, t=t_hop, m=m, μ=μ)
         gate = exp(-(τ / 2) .* Hh)
         update_bond_h!(peps, ix, iy, gate, D_trunc)
     end
