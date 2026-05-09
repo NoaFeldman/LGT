@@ -491,7 +491,7 @@ end
 function run_quench_A_ED(;
         nx=ED_NX, ny=ED_NY, dg=ED_DG,
         g::Float64=ED_G_COUP, t::Float64=ED_T_HOP, m::Float64=ED_M_MASS,
-        dt::Float64=0.02, n_steps::Int=200,
+        dt::Float64=0.02, n_steps::Int=50,
         results_dir::String="results",
         label::String="finite_ed_quench_A")
 
@@ -554,7 +554,7 @@ function run_quench_B_ED(;
         nx=ED_NX, ny=ED_NY, dg=ED_DG,
         g::Float64=ED_G_COUP, t::Float64=ED_T_HOP,
         m_init::Float64=5.0, m_final::Float64=0.1,
-        dt::Float64=0.02, n_steps::Int=200,
+        dt::Float64=0.02, n_steps::Int=50,
         results_dir::String="results",
         label::String="finite_ed_quench_B")
 
@@ -606,7 +606,7 @@ function run_quench_C_ED(;
         nx=ED_NX, ny=ED_NY, dg=ED_DG,
         t::Float64=ED_T_HOP, m::Float64=ED_M_MASS,
         g_init::Float64=2.0, g_final::Float64=0.5,
-        dt::Float64=0.02, n_steps::Int=200,
+        dt::Float64=0.02, n_steps::Int=50,
         results_dir::String="results",
         label::String="finite_ed_quench_C")
 

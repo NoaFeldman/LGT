@@ -5,9 +5,9 @@
 #  SLURM array submission for finite_peps_quench.jl
 #  3×4 finite PEPS lattice (2×3 plaquettes), three quench protocols.
 #  Each array task runs one quench independently:
-#    task 1 → Quench A (string breaking,  ~RT only,   ~1–2 h)
-#    task 2 → Quench B (mass quench,      300 ITE + RT, ~4–8 h)
-#    task 3 → Quench C (coupling quench,  300 ITE + RT, ~4–8 h)
+#    task 1 → Quench A (string breaking,  ~RT only,   ~30 min)
+#    task 2 → Quench B (mass quench,      300 ITE + RT, ~1–2 h)
+#    task 3 → Quench C (coupling quench,  300 ITE + RT, ~1–2 h)
 # =============================================================================
 
 #SBATCH --job-name=fpeps_quench
@@ -17,7 +17,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=0
-#SBATCH --time=08:00:00
+#SBATCH --time=02:00:00
 #SBATCH --partition=main
 
 # ── Paths (mirror cluster_example conventions) ────────────────────────────────
