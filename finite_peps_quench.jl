@@ -481,7 +481,7 @@ function run_quench_C(;
         nx = QNX, ny = QNY, dg = QDG, D_bond = QD_BOND, D_max = QD_MAX,
         t_hop::Float64 = QT_HOP, m::Float64 = QM_MASS,
         g_init::Float64 = 2.0, g_final::Float64 = 0.5,
-        μ_ite::Float64 = 2.0,
+        μ_ite::Float64 = 0.0,
         τ_ite::Float64 = 0.05, n_ite::Int = 300,
         dt::Float64 = 0.02, n_steps::Int = 50,
         label::String = "finite_peps_quench_C",
