@@ -699,6 +699,87 @@ function H_hop_h_site(ix::Int, iy::Int, nx::Int, ny::Int, dg::Int; t::Float64)
     return 0.5 .* (H .+ H')
 end
 
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  Plaquette gate — L-shape SVD decomposition for finite PEPS              ║
+# ║                                                                          ║
+# ║  Lower-left plaquette corner at (i,j).  Active nodes:                    ║
+# ║    A = (i,   j  ): bottom link = right-gauge,  left link = up-gauge     ║
+# ║    B = (i+1, j  ): right link  = up-gauge                                ║
+# ║    C = (i,   j+1): top link    = right-gauge                             ║
+# ║                                                                          ║
+# ║  Required factorisation (matches PEPS bonds: α on A-B, β on A-C):       ║
+# ║    G[b,l,r,t,b',l',r',t'] = Σ_{α,β} GA[b,l,b',l',α,β] GB[r,r',α] GC[t,t',β] ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+"""
+    decompose_plaquette_LShape(G_gauge, dg; D_aux_max, cutoff)
+
+SVD-decompose the 4-link plaquette gate `G_gauge` (size `gd⁴ × gd⁴` in basis
+`|b, l, r, t⟩`) into three tensors matching the L-shape PEPS topology:
+
+    GA :  (gd, gd, gd, gd, D_α, D_β)   indices (b, l, b', l', α, β) — node A
+    GB :  (gd, gd, D_α)                indices (r, r', α)           — node B
+    GC :  (gd, gd, D_β)                indices (t, t', β)           — node C
+
+`α` is the auxiliary index that lives on the A–B horizontal bond, `β` on the
+A–C vertical bond.  Both are bounded by `gd²` (and further truncated at
+`cutoff`).
+"""
+function decompose_plaquette_LShape(G_gauge::AbstractMatrix, dg::Int;
+                                     D_aux_max::Int = 64,
+                                     cutoff::Float64 = 1e-12)
+    gd = gauge_dim(dg)
+    @assert size(G_gauge) == (gd^4, gd^4) "G_gauge must be (gd⁴ × gd⁴)"
+
+    # Original gate index order from H_plaquette_gauge: |b,l,r,t⟩ ⊗ |b',l',r',t'⟩
+    G8 = reshape(G_gauge, gd, gd, gd, gd, gd, gd, gd, gd)
+    # axes: (b, l, r, t,  b', l', r', t')
+
+    # ── SVD #1: isolate B (axes r, r') from {A,C} (axes b,l,t,b',l',t') ──
+    # Permute to (b, l, t, b', l', t',  r, r')
+    G_p1 = permutedims(G8, (1, 2, 4, 5, 6, 8,  3, 7))
+    M1 = reshape(G_p1, gd^6, gd^2)
+    F1 = svd(M1)
+    D_α = min(D_aux_max, count(F1.S .> cutoff), length(F1.S))
+    D_α = max(D_α, 1)
+    sqS1 = sqrt.(F1.S[1:D_α])
+
+    GAC_mat = F1.U[:, 1:D_α]    * Diagonal(sqS1)        # (gd⁶, D_α)
+    GB_mat  = Diagonal(sqS1)    * F1.Vt[1:D_α, :]       # (D_α, gd²)
+    # GB indices: (α, flat(r,r'))  →  reshape to (α, r, r') → permute to (r, r', α)
+    GB = permutedims(reshape(GB_mat, D_α, gd, gd), (2, 3, 1))
+
+    # ── SVD #2: isolate C (axes t, t') from A (axes b,l,b',l',α) ──
+    GAC5 = reshape(GAC_mat, gd, gd, gd, gd, gd, gd, D_α)
+    # axes: (b, l, t, b', l', t', α)  →  (b, l, b', l', α, t, t')
+    GAC_p = permutedims(GAC5, (1, 2, 4, 5, 7,  3, 6))
+    M2 = reshape(GAC_p, gd^4 * D_α, gd^2)
+    F2 = svd(M2)
+    D_β = min(D_aux_max, count(F2.S .> cutoff), length(F2.S))
+    D_β = max(D_β, 1)
+    sqS2 = sqrt.(F2.S[1:D_β])
+
+    GA_mat = F2.U[:, 1:D_β]   * Diagonal(sqS2)         # (gd⁴·D_α, D_β)
+    GC_mat = Diagonal(sqS2)   * F2.Vt[1:D_β, :]        # (D_β, gd²)
+    GA = reshape(GA_mat, gd, gd, gd, gd, D_α, D_β)      # (b, l, b', l', α, β)
+    GC = permutedims(reshape(GC_mat, D_β, gd, gd), (2, 3, 1))  # (t, t', β)
+
+    return (GA = GA, GB = GB, GC = GC, D_α = D_α, D_β = D_β)
+end
+
+"""
+    reconstruct_plaquette_LShape(GA, GB, GC)
+
+Contract the decomposed tensors back into the original `gd⁴ × gd⁴` gate
+matrix in basis `|b,l,r,t⟩`.  Used for verifying `decompose_plaquette_LShape`.
+"""
+function reconstruct_plaquette_LShape(GA, GB, GC)
+    gd = size(GA, 1)
+    @tensor G_recon[b, l, r, t, bp, lp, rp, tp] :=
+        GA[b, l, bp, lp, α, β] * GB[r, rp, α] * GC[t, tp, β]
+    return reshape(G_recon, gd^4, gd^4)
+end
+
 """
     H_hop_v_site(ix, iy, nx, ny, dg; t)
 
