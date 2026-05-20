@@ -587,13 +587,22 @@ function ite_ground_state_v2(nx::Int, ny::Int, dg::Int, D_max::Int;
     # Initialize with D=1 and noise
     peps = init_finite_peps_v2(nx, ny, dg; noise=noise)
 
-    # τ annealing schedule: large → small
+    # τ annealing schedule: large → small.
+    # Final τ=0.001 stage resolves the order-1/g² quantum fluctuations on top
+    # of the classical staggered vacuum that the previous schedule missed.
+    s_coarse1 = div(n_ite, 8)
+    s_coarse2 = div(n_ite, 8)
+    s_medium  = div(n_ite, 4)
+    s_fine1   = div(n_ite, 6)
+    s_fine2   = div(n_ite, 6)
+    s_ultra   = n_ite - (s_coarse1 + s_coarse2 + s_medium + s_fine1 + s_fine2)
     τ_stages = [
-        (τ=0.1,  steps=div(n_ite, 6)),    # coarse
-        (τ=0.05, steps=div(n_ite, 6)),
-        (τ=0.02, steps=div(n_ite, 3)),    # medium
-        (τ=0.01, steps=div(n_ite, 6)),    # fine
-        (τ=0.005, steps=n_ite - div(n_ite,6)*3 - div(n_ite,3)),  # very fine
+        (τ=0.1,   steps=s_coarse1),  # coarse
+        (τ=0.05,  steps=s_coarse2),
+        (τ=0.02,  steps=s_medium),   # medium
+        (τ=0.01,  steps=s_fine1),    # fine
+        (τ=0.005, steps=s_fine2),    # very fine
+        (τ=0.001, steps=s_ultra),    # ultra fine — picks up small quantum fluctuations
     ]
 
     step_total = 0
@@ -611,6 +620,7 @@ function ite_ground_state_v2(nx::Int, ny::Int, dg::Int, D_max::Int;
                                 for iy in 1:ny for ix in 1:nx-1; init=1)
                 @printf("    ITE step %4d / %d (τ=%.4f):  ⟨n_f⟩ = %.5f  D = %d\n",
                         step_total, n_ite, τ, nf_val, D_now)
+                flush(stdout)
             end
         end
     end

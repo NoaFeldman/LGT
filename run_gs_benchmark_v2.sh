@@ -48,7 +48,11 @@ if [[ "${SLURM_ARRAY_TASK_ID}" == "1" ]]; then
     julia --project="${REPO_DIR}" -e 'import Pkg; Pkg.instantiate(); Pkg.precompile()'
 fi
 
-julia --project="${REPO_DIR}" \
+# stdbuf -oL -eL forces line-buffering so the .out / .err files reflect
+# Julia's progress in real time. Without it, stdout is block-buffered (4–64 KB)
+# when redirected to a file, and any prints accumulated since the last flush
+# are lost if the job is killed (walltime, OOM, node failure, preemption).
+stdbuf -oL -eL julia --project="${REPO_DIR}" \
       --threads=${JULIA_NUM_THREADS} \
       "${REPO_DIR}/gs_benchmark_v2.jl"
 

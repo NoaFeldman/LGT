@@ -34,7 +34,7 @@ const V2_DG      = 1
 const V2_D_MAX   = 12
 const V2_N_ITE   = 600
 const V2_T_HOP   = 1.0
-const V2_NOISE   = 0.01
+const V2_NOISE   = 0.1     # larger init noise breaks the classical staggered attractor at strong g
 
 function _make_staggered_charges_v2(nx::Int, ny::Int)
     g_charges = zeros(Int, nx, ny)
