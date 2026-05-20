@@ -415,6 +415,7 @@ function full_update_bond_h!(peps::FinitePEPS, ix::Int, iy::Int,
     # the bond at D=1). Standard SVD of Θ_mat is used unconditionally — the
     # simple-update bond weights already supply a reasonable environment for
     # small lattices, and τ annealing + Trotter ordering does the rest.
+    Θ_mat = reshape(Θ_new, dp_L*sz[2]*sz[3]*sz[4], dp_R*sz[6]*sz[7]*sz[8])
     F = svd(Θ_mat)
 
     D_keep = min(D_trunc, count(F.S .> FU_REG), length(F.S))
