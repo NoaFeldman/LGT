@@ -408,32 +408,14 @@ function full_update_bond_h!(peps::FinitePEPS, ix::Int, iy::Int,
         Θ_new = reshape(Θ_phys, size(Θ_new))
     end
 
-    # SVD split
-    Θ_mat = reshape(Θ_new, dp_L*sz[2]*sz[3]*sz[4], dp_R*sz[6]*sz[7]*sz[8])
-
-    # Environment-weighted SVD (optional)
-    if use_env
-        # Compute approximate norm matrix for weighting
-        try
-            N = compute_norm_env_h(peps, ix, iy)
-            N_herm = 0.5 * (N + N')
-            eN = eigen(Hermitian(N_herm))
-            # Regularize: clamp small eigenvalues
-            evals_N = max.(real.(eN.values), FU_REG)
-            N_sqrt = eN.vectors * Diagonal(sqrt.(evals_N)) * eN.vectors'
-            N_isqrt = eN.vectors * Diagonal(1.0 ./ sqrt.(evals_N)) * eN.vectors'
-
-            # Weight the left physical indices
-            Θ_weighted = reshape(N_sqrt * reshape(Θ_new, dp_L*dp_R, :),
-                                 dp_L*sz[2]*sz[3]*sz[4], dp_R*sz[6]*sz[7]*sz[8])
-            F = svd(Θ_weighted)
-        catch e
-            @warn "Environment computation failed, falling back to standard SVD: $e"
-            F = svd(Θ_mat)
-        end
-    else
-        F = svd(Θ_mat)
-    end
+    # SVD split.
+    # NOTE: the env-weighted SVD that lived here was mathematically broken
+    # (N_isqrt was computed but never applied to F.U, and the local norm
+    # matrix is exactly rank-1 when the current bond dim is 1, which froze
+    # the bond at D=1). Standard SVD of Θ_mat is used unconditionally — the
+    # simple-update bond weights already supply a reasonable environment for
+    # small lattices, and τ annealing + Trotter ordering does the rest.
+    F = svd(Θ_mat)
 
     D_keep = min(D_trunc, count(F.S .> FU_REG), length(F.S))
     D_keep = max(D_keep, 1)
