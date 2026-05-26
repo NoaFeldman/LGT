@@ -31,7 +31,7 @@ const V2_PARAM_GRID = [
 const V2_NX      = 3
 const V2_NY      = 4
 const V2_DG      = 1
-const V2_D_MAX   = 12
+const V2_D_MAX   = 8       # capped from 12: g≥2 tasks self-truncated at D=4, g≤1 tasks blew past 12h walltime at D=12
 const V2_N_ITE   = 600
 const V2_T_HOP   = 1.0
 const V2_NOISE   = 0.1     # larger init noise breaks the classical staggered attractor at strong g

@@ -12,11 +12,11 @@
 #SBATCH --job-name=gs_bench_v2
 #SBATCH --output=logs/gs_bench_v2_%A_%a.out
 #SBATCH --error=logs/gs_bench_v2_%A_%a.err
-#SBATCH --array=1-9
+#SBATCH --array=1,2,3,6,7
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=0
-#SBATCH --time=12:00:00
+#SBATCH --time=24:00:00
 #SBATCH --partition=main
 
 # ─── Paths ───────────────────────────────────────────────────────────────────
