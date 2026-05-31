@@ -435,12 +435,118 @@ function bond_environment_h(gp::GaugePEPS, ix::Int, iy::Int; χ::Int=64)
     return (env=env, RA=RA, RB=RB, QA=QA, QB=QB)
 end
 
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  Stage 2a (vertical): bond environment for a vertical bond               ║
+# ║                                                                          ║
+# ║  Bond A=(ix,iy) [down], B=(ix,iy+1) [up].  Built from a 2-row strip      ║
+# ║  (rows iy, iy+1) sandwiched between boundary_bottom(iy) and              ║
+# ║  boundary_top(iy+1); the non-bond columns are traced vertical pairs.     ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+"""QR-reduce the DOWN site of a vertical bond. A legs (p,l,r,u=bond,d);
+outer=(l,r,d): A = Σ_a Q[l,r,d,a] R[a,p,bond]."""
+function qr_reduce_v_down(A::Array{ComplexF64,5})
+    dp, Dl, Dr, Db, Dd = size(A)
+    M = reshape(permutedims(A, (2,3,5,1,4)), Dl*Dr*Dd, dp*Db)   # (l,r,d,p,bond)
+    F = qr(M); Q = Matrix(F.Q); R = Matrix(F.R); a = size(Q, 2)
+    return reshape(Q, Dl, Dr, Dd, a), reshape(R, a, dp, Db)
+end
+
+"""QR-reduce the UP site of a vertical bond. B legs (p,l,r,u,d=bond);
+outer=(l,r,u): B = Σ_b Q[l,r,u,b] R[b,p,bond]."""
+function qr_reduce_v_up(B::Array{ComplexF64,5})
+    dp, Dl, Dr, Du, Db = size(B)
+    M = reshape(permutedims(B, (2,3,4,1,5)), Dl*Dr*Du, dp*Db)   # (l,r,u,p,bond)
+    F = qr(M); Q = Matrix(F.Q); R = Matrix(F.R); b = size(Q, 2)
+    return reshape(Q, Dl, Dr, Du, b), reshape(R, b, dp, Db)
+end
+
+_dims4(E) = isqrt.(size(E))   # (Dl,Dr,Du,Dd) from (Dl²,Dr²,Du²,Dd²)
+
+"""Absorb a spectator column j (a vertical pair) into the left strip env.
+Lenv legs (tL,bL, liyk,liyb, liy1k,liy1b) → Lnew over the right edge."""
+function _spectator_left_v(Lenv, topj, botj, Eiy, Eiy1)
+    Dl,Dr,Du,Dd       = _dims4(Eiy)
+    Dl1,Dr1,Du1,Dd1   = _dims4(Eiy1)
+    e0 = _split_dl(Eiy,  Dl,Dr,Du,Dd)
+    e1 = _split_dl(Eiy1, Dl1,Dr1,Du1,Dd1)
+    tp = _split_mps(topj, Du1)                 # (tL, ut2, ut1, tR)
+    bt = _split_mps(botj, Dd)                  # (bL, diy2, diy1, bR)
+    @tensor Lnew[tR,bR, riyk,riyb, riy1k,riy1b] :=
+        Lenv[tL,bL, liyk,liyb, liy1k,liy1b] *
+        bt[bL, diy2,diy1, bR] *
+        e0[liyb,liyk, riyb,riyk, vi2,vi1, diy2,diy1] *
+        e1[liy1b,liy1k, riy1b,riy1k, ut2,ut1, vi2,vi1] *
+        tp[tL, ut2,ut1, tR]
+    return Lnew
+end
+
+"""Absorb a spectator column j into the right strip env."""
+function _spectator_right_v(Renv, topj, botj, Eiy, Eiy1)
+    Dl,Dr,Du,Dd       = _dims4(Eiy)
+    Dl1,Dr1,Du1,Dd1   = _dims4(Eiy1)
+    e0 = _split_dl(Eiy,  Dl,Dr,Du,Dd)
+    e1 = _split_dl(Eiy1, Dl1,Dr1,Du1,Dd1)
+    tp = _split_mps(topj, Du1)
+    bt = _split_mps(botj, Dd)
+    @tensor Rnew[tL,bL, liyk,liyb, liy1k,liy1b] :=
+        Renv[tR,bR, riyk,riyb, riy1k,riy1b] *
+        bt[bL, diy2,diy1, bR] *
+        e0[liyb,liyk, riyb,riyk, vi2,vi1, diy2,diy1] *
+        e1[liy1b,liy1k, riy1b,riy1k, ut2,ut1, vi2,vi1] *
+        tp[tL, ut2,ut1, tR]
+    return Rnew
+end
+
+"""
+    bond_environment_v(gp, ix, iy; χ) → (env, RA, RB, QA, QB)
+
+Reduced environment of vertical bond (ix,iy)[down]–(ix,iy+1)[up], analogous to
+`bond_environment_h`.  θ0[aA,p,q,bB] = Σ_bond RA[aA,p,bond] RB[bB,q,bond].
+"""
+function bond_environment_v(gp::GaugePEPS, ix::Int, iy::Int; χ::Int=64)
+    nxv = nx(gp)
+    top = boundary_top(gp, iy+1; χ=χ)        # phys = up-legs of row iy+1
+    bot = boundary_bottom(gp, iy; χ=χ)       # phys = down-legs of row iy
+    row0 = _row_dl(gp, iy)
+    row1 = _row_dl(gp, iy+1)
+
+    A = sqrt_absorbed_site(gp, ix, iy)
+    B = sqrt_absorbed_site(gp, ix, iy+1)
+    QA, RA = qr_reduce_v_down(A)             # QA(l,r,d,a)  RA(a,p,bond)
+    QB, RB = qr_reduce_v_up(B)               # QB(l,r,u,b)  RB(b,p,bond)
+
+    DdA = size(A,5)                          # A down dim
+    DuB = size(B,4)                          # B up dim
+
+    # left strip env over (tL,bL, liyk,liyb, liy1k,liy1b)
+    Lenv = reshape(ComplexF64[1.0], 1,1,1,1,1,1)
+    for j in 1:ix-1
+        Lenv = _spectator_left_v(Lenv, top[j], bot[j], row0[j], row1[j])
+    end
+    Renv = reshape(ComplexF64[1.0], 1,1,1,1,1,1)
+    for j in nxv:-1:ix+1
+        Renv = _spectator_right_v(Renv, top[j], bot[j], row0[j], row1[j])
+    end
+
+    tp = _split_mps(top[ix], DuB)            # (tL, ut2, ut1, tR)
+    bt = _split_mps(bot[ix], DdA)            # (bL, diy2, diy1, bR)
+    @tensor env[aA,bB,aAp,bBp] :=
+        Lenv[tL,bL, liyk,liyb, liy1k,liy1b] *
+        Renv[tR,bR, riyk,riyb, riy1k,riy1b] *
+        bt[bL, diy2,diy1, bR] * tp[tL, ut2,ut1, tR] *
+        QA[liyk,riyk,diy1, aA] * conj(QA[liyb,riyb,diy2, aAp]) *
+        QB[liy1k,riy1k,ut1, bB] * conj(QB[liy1b,riy1b,ut2, bBp])
+
+    return (env=env, RA=RA, RB=RB, QA=QA, QB=QB)
+end
+
 """
     bmps_env_selftest(; …) → Bool
 
-Validate `bond_environment_h`: the environment contracted with the gate-free
-reduced two-site tensor must reproduce ⟨ψ|ψ⟩ from `peps_norm2`, for every
-horizontal bond.  This is the decisive correctness check for Stage 2a.
+Validate `bond_environment_h` and `bond_environment_v`: each environment
+contracted with the gate-free reduced two-site tensor must reproduce ⟨ψ|ψ⟩
+from `peps_norm2`, for every bond.  Decisive correctness check for Stage 2a.
 """
 function bmps_env_selftest(; nxv::Int=3, nyv::Int=4, dg::Int=1,
                             g::Float64=1.0, t_hop::Float64=1.0, m::Float64=0.25,
@@ -458,19 +564,23 @@ function bmps_env_selftest(; nxv::Int=3, nyv::Int=4, dg::Int=1,
     println("─── boundary-MPS Stage-2a environment self-test ───")
     @printf("  reference ⟨ψ|ψ⟩ = %.8e\n", nrm_ref)
     all_ok = true
-    for iy in 1:nyv, ix in 1:nxv-1
-        E = bond_environment_h(gp, ix, iy; χ=χ)
+    function _check(E, tag)
         @tensor θ0[aA,p,q,bB] := E.RA[aA,p,k] * E.RB[bB,q,k]
-        # env · θ0 over (aA,bB) → T[aA',bB',p,q]; then contract with conj(θ0).
         @tensor T[aAp,bBp,p,q] := E.env[aA,bB,aAp,bBp] * θ0[aA,p,q,bB]
         nrm_env = real(sum(T .* conj(permutedims(θ0, (1,4,2,3)))))
         rel = abs(nrm_env - nrm_ref) / abs(nrm_ref)
         ok = rel < 1e-6
         all_ok &= ok
-        @printf("  bond h (%d,%d): env-norm = %.8e   rel.err = %.2e  %s\n",
-                ix, iy, nrm_env, rel, ok ? "PASS" : "FAIL")
+        @printf("  %s: env-norm = %.8e   rel.err = %.2e  %s\n",
+                tag, nrm_env, rel, ok ? "PASS" : "FAIL")
     end
-    println(all_ok ? "  PASS: all horizontal bond environments reproduce ⟨ψ|ψ⟩" :
+    for iy in 1:nyv, ix in 1:nxv-1
+        _check(bond_environment_h(gp, ix, iy; χ=χ), "bond h ($ix,$iy)")
+    end
+    for iy in 1:nyv-1, ix in 1:nxv
+        _check(bond_environment_v(gp, ix, iy; χ=χ), "bond v ($ix,$iy)")
+    end
+    println(all_ok ? "  PASS: all bond environments reproduce ⟨ψ|ψ⟩" :
                      "  FAIL: environment mismatch — inspect above")
     return all_ok
 end
