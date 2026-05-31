@@ -12,9 +12,13 @@ include(joinpath(@__DIR__, "finite_peps_boundary_mps.jl"))
 
 using Printf
 
-ok = bmps_selftest(; nxv=3, nyv=4, dg=1, g=1.0, t_hop=1.0, m=0.25,
-                    χ=64, nsteps=20, noise=0.1)
-
+ok1 = bmps_selftest(; nxv=3, nyv=4, dg=1, g=1.0, t_hop=1.0, m=0.25,
+                     χ=64, nsteps=20, noise=0.1)
 println()
-println(ok ? "ALL STAGE-1 CHECKS PASSED" : "STAGE-1 CHECKS FAILED — inspect output above")
+ok2 = bmps_env_selftest(; nxv=3, nyv=4, dg=1, g=1.0, t_hop=1.0, m=0.25,
+                         χ=64, nsteps=20, noise=0.1)
+
+ok = ok1 && ok2
+println()
+println(ok ? "ALL STAGE-1+2a CHECKS PASSED" : "CHECKS FAILED — inspect output above")
 exit(ok ? 0 : 1)

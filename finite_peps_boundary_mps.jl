@@ -25,6 +25,7 @@
    ═══════════════════════════════════════════════════════════════════════════ =#
 
 using LinearAlgebra
+using TensorOperations
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  Symmetric (sqrt) weight absorption                                      ║
@@ -181,6 +182,8 @@ Contraction of all rows above `stop_row` (rows stop_row+1 … ny).
 """
 function boundary_top(gp::GaugePEPS, stop_row::Int; χ::Int)
     nyv = ny(gp)
+    # No rows above the top row → trivial environment (phys = U² = 1).
+    stop_row >= nyv && return [reshape(ComplexF64[1.0], 1, 1, 1) for _ in 1:nx(gp)]
     mps = _row_as_mps_down(_row_dl(gp, nyv))          # phys = up-leg of row ny-1
     for r in (nyv-1):-1:(stop_row+1)
         mps = absorb_row_from_top(mps, _row_dl(gp, r))
@@ -202,6 +205,8 @@ end
 Contraction of all rows below `stop_row` (rows 1 … stop_row-1).
 """
 function boundary_bottom(gp::GaugePEPS, stop_row::Int; χ::Int)
+    # No rows below the bottom row → trivial environment (phys = D² = 1).
+    stop_row <= 1 && return [reshape(ComplexF64[1.0], 1, 1, 1) for _ in 1:nx(gp)]
     mps = _row_as_mps_up(_row_dl(gp, 1))              # phys = down-leg of row 2
     for r in 2:(stop_row-1)
         mps = absorb_row_from_bottom(mps, _row_dl(gp, r))
@@ -285,4 +290,187 @@ function bmps_selftest(; nxv::Int=3, nyv::Int=4, dg::Int=1,
     println(viol < 1e-10 ? "  PASS: gauge invariance preserved" :
                            "  FAIL: gauge invariance broken")
     return ok_norm && viol < 1e-10
+end
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  Stage 2a: bond environment via QR reduction + boundary MPS              ║
+# ║                                                                          ║
+# ║  For a horizontal bond A=(ix,iy), B=(ix+1,iy):                          ║
+# ║    • QR-reduce A over (outer = l,u,d | inner = p,bond) → Q_A · R_A      ║
+# ║      and B over (inner = p,bond | outer = r,u,d) → R_B · Q_B            ║
+# ║    • absorb Q_A, Q_B (ket & bra) into the boundary-MPS row contraction   ║
+# ║      so the environment is a small tensor  env[aA,bB,aA',bB'].          ║
+# ║    • ⟨ψ|ψ⟩ = Σ env · θ0 · conj(θ0),  θ0[aA,p,p,bB] = Σ_bond R_A R_B.    ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+"""Reshape a traced double tensor (Dl²,Dr²,Du²,Dd²) → (Dl,Dl,Dr,Dr,Du,Du,Dd,Dd).
+Index pairs are (bra, ket) — bra is the faster sub-index (matches `_dl_traced`)."""
+function _split_dl(E::Array{ComplexF64,4}, Dl, Dr, Du, Dd)
+    return reshape(E, Dl, Dl, Dr, Dr, Du, Du, Dd, Dd)
+end
+
+"""Reshape a boundary-MPS phys leg (X²) into (bra, ket)."""
+_split_mps(M::Array{ComplexF64,3}, DX) =
+    reshape(M, size(M,1), DX, DX, size(M,3))   # (vL, x_bra, x_ket, vR)
+
+# ── Charge-preserving QR of a bond site ──────────────────────────────────────
+
+"""
+    qr_reduce_h_left(A) → (Q, R)  for the LEFT site of a horizontal bond.
+
+A has legs (p,l,r=bond,u,d).  Splits outer=(l,u,d) from inner=(p,bond):
+    A[p,l,r,u,d] = Σ_a Q[l,u,d,a] · R[a,p,r]
+Q is an isometry on the outer legs; R carries physical + bond.
+"""
+function qr_reduce_h_left(A::Array{ComplexF64,5})
+    dp, Dl, Db, Du, Dd = size(A)
+    Aperm = permutedims(A, (2,4,5,1,3))            # (l,u,d,p,bond)
+    M = reshape(Aperm, Dl*Du*Dd, dp*Db)
+    F = qr(M); Q = Matrix(F.Q); R = Matrix(F.R)
+    a = size(Q, 2)
+    Qt = reshape(Q, Dl, Du, Dd, a)                 # (l,u,d,a)
+    Rt = reshape(R, a, dp, Db)                      # (a,p,bond)
+    return Qt, Rt
+end
+
+"""
+    qr_reduce_h_right(B) → (Q, R)  for the RIGHT site of a horizontal bond.
+
+B has legs (p,l=bond,r,u,d).  Splits outer=(r,u,d) from inner=(p,bond):
+    B[p,l,r,u,d] = Σ_b Q[r,u,d,b] · R[b,p,l]
+"""
+function qr_reduce_h_right(B::Array{ComplexF64,5})
+    dp, Db, Dr, Du, Dd = size(B)
+    Bperm = permutedims(B, (3,4,5,1,2))            # (r,u,d,p,bond)
+    M = reshape(Bperm, Dr*Du*Dd, dp*Db)
+    F = qr(M); Q = Matrix(F.Q); R = Matrix(F.R)
+    b = size(Q, 2)
+    Qt = reshape(Q, Dr, Du, Dd, b)                 # (r,u,d,b)
+    Rt = reshape(R, b, dp, Db)                      # (b,p,bond)
+    return Qt, Rt
+end
+
+# ── Left / right row environments (spectator columns) ────────────────────────
+
+"""Absorb a spectator column j into the left row-environment.
+Lenv legs (tL,bL,lket,lbra); returns new Lenv (tR,bR,rket,rbra)."""
+function _spectator_left(Lenv, topj, botj, Ej, Dl,Dr,Du,Dd)
+    E8  = _split_dl(Ej, Dl,Dr,Du,Dd)               # (l2,l1,r2,r1,u2,u1,d2,d1)
+    tp  = _split_mps(topj, Du)                     # (tL,u2,u1,tR)
+    bt  = _split_mps(botj, Dd)                     # (bL,d2,d1,bR)
+    @tensor Lnew[tR,bR,rket,rbra] :=
+        Lenv[tL,bL,lket,lbra] * tp[tL,u2,u1,tR] * bt[bL,d2,d1,bR] *
+        E8[lbra,lket,rbra,rket,u2,u1,d2,d1]
+    return Lnew
+end
+
+"""Absorb a spectator column j into the right row-environment.
+Renv legs (tR,bR,rket,rbra); returns new Renv (tL,bL,lket,lbra)."""
+function _spectator_right(Renv, topj, botj, Ej, Dl,Dr,Du,Dd)
+    E8  = _split_dl(Ej, Dl,Dr,Du,Dd)
+    tp  = _split_mps(topj, Du)
+    bt  = _split_mps(botj, Dd)
+    @tensor Rnew[tL,bL,lket,lbra] :=
+        Renv[tR,bR,rket,rbra] * tp[tL,u2,u1,tR] * bt[bL,d2,d1,bR] *
+        E8[lbra,lket,rbra,rket,u2,u1,d2,d1]
+    return Rnew
+end
+
+"""
+    bond_environment_h(gp, ix, iy; χ) → (env, RA, RB, QA, QB)
+
+Reduced environment of horizontal bond (ix,iy)–(ix+1,iy):
+  env[aA,bB,aA',bB'] such that
+     ⟨ψ|ψ⟩ = Σ env[aA,bB,aA',bB'] θ0[aA,p,q,bB] conj(θ0[aA',p,q,bB'])
+  with θ0[aA,p,q,bB] = Σ_bond RA[aA,p,bond] RB[bB,q,bond].
+Uses sqrt-absorbed (symmetric-gauge) tensors.  Only the bond's two sites use
+the gate-free reduced tensors RA, RB; everything else is in env.
+"""
+function bond_environment_h(gp::GaugePEPS, ix::Int, iy::Int; χ::Int=64)
+    nxv = nx(gp)
+    top = boundary_top(gp, iy; χ=χ)
+    bot = boundary_bottom(gp, iy; χ=χ)
+    row = _row_dl(gp, iy)                            # traced double tensors (sqrt-absorbed)
+
+    # sqrt-absorbed site tensors of the two bond sites (gate-free)
+    A = sqrt_absorbed_site(gp, ix,   iy)
+    B = sqrt_absorbed_site(gp, ix+1, iy)
+    QA, RA = qr_reduce_h_left(A)                     # QA(l,u,d,a)  RA(a,p,bond)
+    QB, RB = qr_reduce_h_right(B)                    # QB(r,u,d,b)  RB(b,p,bond)
+
+    DlA = size(A,2); DuA = size(A,4); DdA = size(A,5)
+    DrB = size(B,3); DuB = size(B,4); DdB = size(B,5)
+
+    # ── Left environment: spectator columns 1..ix-1 ──────────────────────
+    Lenv = reshape(ComplexF64[1.0], 1,1,1,1)        # (tL,bL,lket,lbra)
+    for j in 1:ix-1
+        Dl,Dr,Du,Dd = isqrt.(size(row[j]))
+        Lenv = _spectator_left(Lenv, top[j], bot[j], row[j], Dl,Dr,Du,Dd)
+    end
+
+    # ── Right environment: spectator columns ix+2..nx ────────────────────
+    Renv = reshape(ComplexF64[1.0], 1,1,1,1)        # (tR,bR,rket,rbra)
+    for j in nxv:-1:ix+2
+        Dl,Dr,Du,Dd = isqrt.(size(row[j]))
+        Renv = _spectator_right(Renv, top[j], bot[j], row[j], Dl,Dr,Du,Dd)
+    end
+
+    # ── Contract A column: Lenv + QA + top[ix] + bot[ix] → GA[aA,aA',tR,bR]
+    tpA = _split_mps(top[ix], DuA)                  # (tL,u2,u1,tR)
+    btA = _split_mps(bot[ix], DdA)                  # (bL,d2,d1,bR)
+    @tensor GA[aA,aAp,tR,bR] :=
+        Lenv[tL,bL,lket,lbra] * tpA[tL,u2,u1,tR] * btA[bL,d2,d1,bR] *
+        QA[lket,u1,d1,aA] * conj(QA[lbra,u2,d2,aAp])
+
+    # ── Contract B column: Renv + QB + top[ix+1] + bot[ix+1] → GB[bB,bB',tL,bL]
+    tpB = _split_mps(top[ix+1], DuB)
+    btB = _split_mps(bot[ix+1], DdB)
+    @tensor GB[bB,bBp,tL,bL] :=
+        Renv[tR,bR,rket,rbra] * tpB[tL,u2,u1,tR] * btB[bL,d2,d1,bR] *
+        QB[rket,u1,d1,bB] * conj(QB[rbra,u2,d2,bBp])
+
+    # ── Close the MPS bonds between the A and B columns ──────────────────
+    @tensor env[aA,bB,aAp,bBp] := GA[aA,aAp,t,b] * GB[bB,bBp,t,b]
+
+    return (env=env, RA=RA, RB=RB, QA=QA, QB=QB)
+end
+
+"""
+    bmps_env_selftest(; …) → Bool
+
+Validate `bond_environment_h`: the environment contracted with the gate-free
+reduced two-site tensor must reproduce ⟨ψ|ψ⟩ from `peps_norm2`, for every
+horizontal bond.  This is the decisive correctness check for Stage 2a.
+"""
+function bmps_env_selftest(; nxv::Int=3, nyv::Int=4, dg::Int=1,
+                            g::Float64=1.0, t_hop::Float64=1.0, m::Float64=0.25,
+                            χ::Int=64, nsteps::Int=20, noise::Float64=0.1)
+    gch = zeros(Int, nxv, nyv)
+    for iy in 1:nyv, ix in 1:nxv
+        isodd(ix + iy) && (gch[ix, iy] = -1)
+    end
+    gp = init_gauge_peps(nxv, nyv, dg, gch; noise=noise)
+    for _ in 1:nsteps
+        trotter_step_gauge!(gp; gcoup=g, t_hop=t_hop, m=m, τ=0.05, D_max=6)
+    end
+
+    nrm_ref = real(peps_norm2(gp; χ=χ))
+    println("─── boundary-MPS Stage-2a environment self-test ───")
+    @printf("  reference ⟨ψ|ψ⟩ = %.8e\n", nrm_ref)
+    all_ok = true
+    for iy in 1:nyv, ix in 1:nxv-1
+        E = bond_environment_h(gp, ix, iy; χ=χ)
+        @tensor θ0[aA,p,q,bB] := E.RA[aA,p,k] * E.RB[bB,q,k]
+        @tensor nrm_env_c := E.env[aA,bB,aAp,bBp] *
+                             θ0[aA,p,q,bB] * conj(θ0[aAp,p,q,bBp])
+        nrm_env = real(nrm_env_c)
+        rel = abs(nrm_env - nrm_ref) / abs(nrm_ref)
+        ok = rel < 1e-6
+        all_ok &= ok
+        @printf("  bond h (%d,%d): env-norm = %.8e   rel.err = %.2e  %s\n",
+                ix, iy, nrm_env, rel, ok ? "PASS" : "FAIL")
+    end
+    println(all_ok ? "  PASS: all horizontal bond environments reproduce ⟨ψ|ψ⟩" :
+                     "  FAIL: environment mismatch — inspect above")
+    return all_ok
 end
