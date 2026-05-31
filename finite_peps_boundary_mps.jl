@@ -461,9 +461,9 @@ function bmps_env_selftest(; nxv::Int=3, nyv::Int=4, dg::Int=1,
     for iy in 1:nyv, ix in 1:nxv-1
         E = bond_environment_h(gp, ix, iy; χ=χ)
         @tensor θ0[aA,p,q,bB] := E.RA[aA,p,k] * E.RB[bB,q,k]
-        @tensor nrm_env_c := E.env[aA,bB,aAp,bBp] *
-                             θ0[aA,p,q,bB] * conj(θ0[aAp,p,q,bBp])
-        nrm_env = real(nrm_env_c)
+        # env · θ0 over (aA,bB) → T[aA',bB',p,q]; then contract with conj(θ0).
+        @tensor T[aAp,bBp,p,q] := E.env[aA,bB,aAp,bBp] * θ0[aA,p,q,bB]
+        nrm_env = real(sum(T .* conj(permutedims(θ0, (1,4,2,3)))))
         rel = abs(nrm_env - nrm_ref) / abs(nrm_ref)
         ok = rel < 1e-6
         all_ok &= ok
