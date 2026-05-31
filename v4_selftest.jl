@@ -13,10 +13,10 @@ include(joinpath(@__DIR__, "finite_peps_boundary_mps.jl"))
 using Printf
 
 ok1 = bmps_selftest(; nxv=3, nyv=4, dg=1, g=1.0, t_hop=1.0, m=0.25,
-                     χ=64, nsteps=20, noise=0.1)
+                     χ=64, nsteps=20, noise=0.1, Dmax=4)
 println()
 ok2 = bmps_env_selftest(; nxv=3, nyv=4, dg=1, g=1.0, t_hop=1.0, m=0.25,
-                         χ=64, nsteps=20, noise=0.1)
+                         χ=64, nsteps=20, noise=0.1, Dmax=4)
 
 ok = ok1 && ok2
 println()

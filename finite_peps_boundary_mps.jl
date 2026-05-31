@@ -259,7 +259,7 @@ Prints PASS/FAIL lines; does not mutate global state.
 """
 function bmps_selftest(; nxv::Int=3, nyv::Int=4, dg::Int=1,
                         g::Float64=1.0, t_hop::Float64=1.0, m::Float64=0.25,
-                        χ::Int=64, nsteps::Int=20, noise::Float64=0.1)
+                        χ::Int=64, nsteps::Int=20, noise::Float64=0.1, Dmax::Int=4)
     gch = zeros(Int, nxv, nyv)
     for iy in 1:nyv, ix in 1:nxv
         isodd(ix + iy) && (gch[ix, iy] = -1)
@@ -267,7 +267,7 @@ function bmps_selftest(; nxv::Int=3, nyv::Int=4, dg::Int=1,
     gp = init_gauge_peps(nxv, nyv, dg, gch; noise=noise)
     # a few simple-update steps to give the bonds nontrivial structure
     for _ in 1:nsteps
-        trotter_step_gauge!(gp; gcoup=g, t_hop=t_hop, m=m, τ=0.05, D_max=6)
+        trotter_step_gauge!(gp; gcoup=g, t_hop=t_hop, m=m, τ=0.05, D_max=Dmax)
     end
 
     println("─── boundary-MPS Stage-1 self-test ───")
@@ -531,10 +531,15 @@ function bond_environment_v(gp::GaugePEPS, ix::Int, iy::Int; χ::Int=64)
 
     tp = _split_mps(top[ix], DuB)            # (tL, ut2, ut1, tR)
     bt = _split_mps(bot[ix], DdA)            # (bL, diy2, diy1, bR)
+    # Factor order matters: @tensor contracts left-to-right, so each adjacent
+    # pair MUST share an index (else an outer product blows up memory).
+    # Sequence: Lenv·tp (tL) → ·Renv (tR) → ·bt (bL,bR) = frame, then absorb
+    # the four Q tensors one at a time so no intermediate exceeds ~D⁹.
     @tensor env[aA,bB,aAp,bBp] :=
         Lenv[tL,bL, liyk,liyb, liy1k,liy1b] *
+        tp[tL, ut2,ut1, tR] *
         Renv[tR,bR, riyk,riyb, riy1k,riy1b] *
-        bt[bL, diy2,diy1, bR] * tp[tL, ut2,ut1, tR] *
+        bt[bL, diy2,diy1, bR] *
         QA[liyk,riyk,diy1, aA] * conj(QA[liyb,riyb,diy2, aAp]) *
         QB[liy1k,riy1k,ut1, bB] * conj(QB[liy1b,riy1b,ut2, bBp])
 
@@ -550,14 +555,14 @@ from `peps_norm2`, for every bond.  Decisive correctness check for Stage 2a.
 """
 function bmps_env_selftest(; nxv::Int=3, nyv::Int=4, dg::Int=1,
                             g::Float64=1.0, t_hop::Float64=1.0, m::Float64=0.25,
-                            χ::Int=64, nsteps::Int=20, noise::Float64=0.1)
+                            χ::Int=64, nsteps::Int=20, noise::Float64=0.1, Dmax::Int=4)
     gch = zeros(Int, nxv, nyv)
     for iy in 1:nyv, ix in 1:nxv
         isodd(ix + iy) && (gch[ix, iy] = -1)
     end
     gp = init_gauge_peps(nxv, nyv, dg, gch; noise=noise)
     for _ in 1:nsteps
-        trotter_step_gauge!(gp; gcoup=g, t_hop=t_hop, m=m, τ=0.05, D_max=6)
+        trotter_step_gauge!(gp; gcoup=g, t_hop=t_hop, m=m, τ=0.05, D_max=Dmax)
     end
 
     nrm_ref = real(peps_norm2(gp; χ=χ))
