@@ -79,6 +79,18 @@ end
 # ║  it each iteration (eR(pL)=βflux) to stay gauge-invariant.               ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
+"""Environment-weighted squared error  ‖θ − XY‖²_env  (XY = Σ_β X·Y)."""
+function als_cost(θ, env, X, Y)
+    θperm = conj(permutedims(θ, (1,4,2,3)))                 # (aA,bB,pL,pR)
+    @tensor Eθ[aAp,bBp,pL,pR] := env[aA,bB,aAp,bBp] * θ[aA,pL,pR,bB]
+    θθ = real(sum(Eθ .* θperm))
+    @tensor XY[aA,pL,pR,bB] := X[aA,pL,β] * Y[bB,pR,β]
+    @tensor EXY[aAp,bBp,pL,pR] := env[aA,bB,aAp,bBp] * XY[aA,pL,pR,bB]
+    XYθ  = sum(EXY .* θperm)
+    XYXY = real(sum(EXY .* conj(permutedims(XY, (1,4,2,3)))))
+    return θθ - 2*real(XYθ) + XYXY
+end
+
 function als_truncate(θ::Array{ComplexF64,4}, env::Array{ComplexF64,4},
                       D_max::Int, eRofpL::Vector{Int}, impliedR;
                       n_als::Int=30, reg::Float64=V4_ALS_REG)
@@ -101,6 +113,10 @@ function als_truncate(θ::Array{ComplexF64,4}, env::Array{ComplexF64,4},
     # flux mask for X: keep eR(pL)==βflux[β]
     Xmask = [eRofpL[pL] == βflux[β] for _ in 1:nA, pL in 1:dpL, β in 1:Dp]
     project_X!(Xv) = (@inbounds for i in eachindex(Xv); Xmask[i] || (Xv[i]=0); end)
+
+    # Stable fallback: the init is the v3-equivalent unweighted truncation.
+    X0 = copy(X); Y0 = copy(Y)
+    cost0 = als_cost(θ, env, X0, Y0)
 
     # ── ALS sweeps ────────────────────────────────────────────────────────
     for _ in 1:n_als
@@ -125,7 +141,16 @@ function als_truncate(θ::Array{ComplexF64,4}, env::Array{ComplexF64,4},
             Y[:,pR,:] = reshape(y, nB, Dp)
         end
     end
-    return X, Y, βflux
+
+    # Accept the ALS refinement only if it is finite and lowers the env cost;
+    # otherwise keep the stable v3-equivalent init (guarantees v4 ≥ v3, no
+    # degenerate/zero results).
+    cost1 = als_cost(θ, env, X, Y)
+    if isfinite(cost1) && cost1 < cost0
+        return X, Y, βflux
+    else
+        return X0, Y0, βflux
+    end
 end
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
