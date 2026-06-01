@@ -153,7 +153,7 @@ function full_update_bond_h_v4!(gp::GaugePEPS, ix::Int, iy::Int,
     θ = _apply_gate(θ, gate, dpL, dpR)
 
     eRofpL = [decode_phys(p, d_gR_L, d_gU_L, dg)[2] for p in 1:dpL]
-    X, Y, _ = als_truncate(θ, E.env, D_max, eRofpL, nothing; n_als=n_als)
+    X, Y, βflux = als_truncate(θ, E.env, D_max, eRofpL, nothing; n_als=n_als)
 
     # reassemble (symmetric sqrt-absorbed gauge): A(p,l,β,u,d), B(p,β,r,u,d)
     @tensor Afull[p,l,r,u,d] := E.QA[l,u,d,aA] * X[aA,p,r]
@@ -162,8 +162,17 @@ function full_update_bond_h_v4!(gp::GaugePEPS, ix::Int, iy::Int,
     # strip the transverse sqrt-weights that sqrt_absorbed_site put in
     _strip_h!(gp, ix, iy, Afull, Bfull)
 
-    # contract over the new bond and re-canonicalise (definite-flux Vidal form)
-    _recanonicalise_h!(gp, ix, iy, Afull, Bfull, D_max)
+    # Enforce gauge invariance using the ALS bond fluxes before the final SVD:
+    # ALS projects X but not Y, so Bfull can carry small cross-sector content.
+    # Store as the new bond (flux = βflux), mask both sites clean, then the
+    # analytic charge-SVD re-canonicalises into definite-flux Vidal form.
+    peps.tensors[ix,   iy] = Afull
+    peps.tensors[ix+1, iy] = Bfull
+    peps.λh[ix, iy] = ones(length(βflux))
+    gp.qh[ix, iy]   = βflux
+    apply_mask!(gp, ix, iy); apply_mask!(gp, ix+1, iy)
+
+    _recanonicalise_h!(gp, ix, iy, peps.tensors[ix,iy], peps.tensors[ix+1,iy], D_max)
     apply_mask!(gp, ix, iy); apply_mask!(gp, ix+1, iy)
     return nothing
 end
@@ -250,14 +259,22 @@ function full_update_bond_v_v4!(gp::GaugePEPS, ix::Int, iy::Int,
     θ = _apply_gate(θ, gate, dpD, dpU)
 
     eUofpD = [decode_phys(p, d_gR_D, d_gU_D, dg)[3] for p in 1:dpD]   # bond flux = e_U
-    X, Y, _ = als_truncate(θ, E.env, D_max, eUofpD, nothing; n_als=n_als)
+    X, Y, βflux = als_truncate(θ, E.env, D_max, eUofpD, nothing; n_als=n_als)
 
     # reassemble: A(down) outer=(l,r,d) bond=u;  B(up) outer=(l,r,u) bond=d
     @tensor Afull[p,l,r,u,d] := E.QA[l,r,d,aA] * X[aA,p,u]
     @tensor Bfull[p,l,r,u,d] := E.QB[l,r,u,bB] * Y[bB,p,d]
 
     _strip_v!(gp, ix, iy, Afull, Bfull)
-    _recanonicalise_v!(gp, ix, iy, Afull, Bfull, D_max)
+
+    # Enforce gauge invariance with the ALS bond fluxes before re-canonicalising.
+    peps.tensors[ix, iy]   = Afull
+    peps.tensors[ix, iy+1] = Bfull
+    peps.λv[ix, iy] = ones(length(βflux))
+    gp.qv[ix, iy]   = βflux
+    apply_mask!(gp, ix, iy); apply_mask!(gp, ix, iy+1)
+
+    _recanonicalise_v!(gp, ix, iy, peps.tensors[ix,iy], peps.tensors[ix,iy+1], D_max)
     apply_mask!(gp, ix, iy); apply_mask!(gp, ix, iy+1)
     return nothing
 end
