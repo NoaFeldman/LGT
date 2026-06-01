@@ -162,17 +162,7 @@ function full_update_bond_h_v4!(gp::GaugePEPS, ix::Int, iy::Int,
     # strip the transverse sqrt-weights that sqrt_absorbed_site put in
     _strip_h!(gp, ix, iy, Afull, Bfull)
 
-    # Enforce gauge invariance using the ALS bond fluxes before the final SVD:
-    # ALS projects X but not Y, so Bfull can carry small cross-sector content.
-    # Store as the new bond (flux = βflux), mask both sites clean, then the
-    # analytic charge-SVD re-canonicalises into definite-flux Vidal form.
-    peps.tensors[ix,   iy] = Afull
-    peps.tensors[ix+1, iy] = Bfull
-    peps.λh[ix, iy] = ones(length(βflux))
-    gp.qh[ix, iy]   = βflux
-    apply_mask!(gp, ix, iy); apply_mask!(gp, ix+1, iy)
-
-    _recanonicalise_h!(gp, ix, iy, peps.tensors[ix,iy], peps.tensors[ix+1,iy], D_max)
+    _recanonicalise_h!(gp, ix, iy, Afull, Bfull, D_max)
     apply_mask!(gp, ix, iy); apply_mask!(gp, ix+1, iy)
     return nothing
 end
@@ -211,18 +201,16 @@ function _recanonicalise_h!(gp, ix, iy, A, B, D_max)
     row_charge = Vector{Int}(undef, nrow)
     for r0 in 0:nrow-1
         pL = (r0 % dpL) + 1
-        row_charge[r0+1] = decode_phys(pL, d_gR_L, d_gU_L, dg)[2]
+        row_charge[r0+1] = decode_phys(pL, d_gR_L, d_gU_L, dg)[2]   # bond flux = e_R(L)
     end
-    col_charge = Vector{Int}(undef, ncol)
-    for c0 in 0:ncol-1
-        pR   = (c0 % dpR) + 1
-        rest = c0 ÷ dpR
-        dR0  = (rest ÷ DrB) ÷ DuB
-        f_dR = (iy > 1) ? gp.qv[ix+1, iy-1][dR0+1] : 0
-        nfR, eRR, eUR = decode_phys(pR, d_gR_R, d_gU_R, dg)
-        col_charge[c0+1] = eRR + eUR - f_dR - nfR - gp.g_charges[ix+1, iy]
-    end
+    # Block-detection (each column inherits the sector of its dominant row) is
+    # robust to any residual cross-sector content from ALS, unlike the analytic
+    # Gauss formula which needs perfect gauge invariance.
+    col_charge = _col_charge_from_blocks(Θm, row_charge)
 
+    if norm(Θm) < 1e-12
+        @warn "_recanonicalise_h!: ‖Θ‖≈0 at bond ($ix,$iy) — reassembly produced ~0" norm(Θm)
+    end
     U, S, Vt, newq = charge_svd(Θm, row_charge, col_charge, D_max)
     Dk = length(S)
     λnew = S ./ max(norm(S), 1e-15)
@@ -267,14 +255,7 @@ function full_update_bond_v_v4!(gp::GaugePEPS, ix::Int, iy::Int,
 
     _strip_v!(gp, ix, iy, Afull, Bfull)
 
-    # Enforce gauge invariance with the ALS bond fluxes before re-canonicalising.
-    peps.tensors[ix, iy]   = Afull
-    peps.tensors[ix, iy+1] = Bfull
-    peps.λv[ix, iy] = ones(length(βflux))
-    gp.qv[ix, iy]   = βflux
-    apply_mask!(gp, ix, iy); apply_mask!(gp, ix, iy+1)
-
-    _recanonicalise_v!(gp, ix, iy, peps.tensors[ix,iy], peps.tensors[ix,iy+1], D_max)
+    _recanonicalise_v!(gp, ix, iy, Afull, Bfull, D_max)
     apply_mask!(gp, ix, iy); apply_mask!(gp, ix, iy+1)
     return nothing
 end
@@ -310,18 +291,13 @@ function _recanonicalise_v!(gp, ix, iy, D, U, D_max)
     row_charge = Vector{Int}(undef, nrow)
     for r0 in 0:nrow-1
         pD = (r0 % dpD) + 1
-        row_charge[r0+1] = decode_phys(pD, d_gR_D, d_gU_D, dg)[3]   # e_U
+        row_charge[r0+1] = decode_phys(pD, d_gR_D, d_gU_D, dg)[3]   # bond flux = e_U(D)
     end
-    col_charge = Vector{Int}(undef, ncol)
-    for c0 in 0:ncol-1
-        pU   = (c0 % dpU) + 1
-        rest = c0 ÷ dpU
-        lU0  = rest % DlU
-        f_lU = (ix > 1) ? gp.qh[ix-1, iy+1][lU0+1] : 0
-        nfU, eRU, eUU = decode_phys(pU, d_gR_U, d_gU_U, dg)
-        col_charge[c0+1] = eRU + eUU - f_lU - nfU - gp.g_charges[ix, iy+1]
-    end
+    col_charge = _col_charge_from_blocks(Θm, row_charge)
 
+    if norm(Θm) < 1e-12
+        @warn "_recanonicalise_v!: ‖Θ‖≈0 at bond ($ix,$iy) — reassembly produced ~0" norm(Θm)
+    end
     Uu, S, Vt, newq = charge_svd(Θm, row_charge, col_charge, D_max)
     Dk = length(S)
     λnew = S ./ max(norm(S), 1e-15)
