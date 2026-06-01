@@ -156,11 +156,11 @@ function full_update_bond_h_v4!(gp::GaugePEPS, ix::Int, iy::Int,
     X, Y, βflux = als_truncate(θ, E.env, D_max, eRofpL, nothing; n_als=n_als)
 
     # reassemble (symmetric sqrt-absorbed gauge): A(p,l,β,u,d), B(p,β,r,u,d)
+    # Keep the sqrt(transverse λ) absorbed (from QA,QB) so the re-canonicalising
+    # SVD sees the WEIGHTED state and produces correct Schmidt values; the
+    # transverse weights are peeled afterwards (as in v3 simple update).
     @tensor Afull[p,l,r,u,d] := E.QA[l,u,d,aA] * X[aA,p,r]
     @tensor Bfull[p,l,r,u,d] := E.QB[r,u,d,bB] * Y[bB,p,l]
-
-    # strip the transverse sqrt-weights that sqrt_absorbed_site put in
-    _strip_h!(gp, ix, iy, Afull, Bfull)
 
     _recanonicalise_h!(gp, ix, iy, Afull, Bfull, D_max)
     apply_mask!(gp, ix, iy); apply_mask!(gp, ix+1, iy)
@@ -220,6 +220,21 @@ function _recanonicalise_h!(gp, ix, iy, A, B, D_max)
     Rtmp = reshape(Vt, Dk, dpR, DrB, DuB, DdB)         # (β,p,r,u,d)
     Rnew = permutedims(Rtmp, (2,1,3,4,5))              # (p,β,r,u,d)
 
+    # Peel the transverse sqrt-weights (absorbed via QA,QB) to recover Vidal Γ.
+    isq(λ) = 1.0 ./ (sqrt.(λ) .+ FU_REG)
+    il  = (ix > 1)        ? isq(peps.λh[ix-1, iy])   : ones(1)
+    iuL = (iy < ny(gp))   ? isq(peps.λv[ix,   iy])   : ones(1)
+    idL = (iy > 1)        ? isq(peps.λv[ix, iy-1])   : ones(1)
+    ir  = (ix+1 < nx(gp)) ? isq(peps.λh[ix+1, iy])   : ones(1)
+    iuR = (iy < ny(gp))   ? isq(peps.λv[ix+1, iy])   : ones(1)
+    idR = (iy > 1)        ? isq(peps.λv[ix+1, iy-1]) : ones(1)
+    @inbounds for d in 1:DdA, u in 1:DuA, r in 1:Dk, l in 1:DlA, p in 1:dpL
+        Lnew[p,l,r,u,d] *= il[l] * iuL[u] * idL[d]
+    end
+    @inbounds for d in 1:DdB, u in 1:DuB, r in 1:DrB, l in 1:Dk, p in 1:dpR
+        Rnew[p,l,r,u,d] *= ir[r] * iuR[u] * idR[d]
+    end
+
     peps.tensors[ix,   iy] = Lnew
     peps.tensors[ix+1, iy] = Rnew
     peps.λh[ix, iy] = λnew
@@ -252,8 +267,6 @@ function full_update_bond_v_v4!(gp::GaugePEPS, ix::Int, iy::Int,
     # reassemble: A(down) outer=(l,r,d) bond=u;  B(up) outer=(l,r,u) bond=d
     @tensor Afull[p,l,r,u,d] := E.QA[l,r,d,aA] * X[aA,p,u]
     @tensor Bfull[p,l,r,u,d] := E.QB[l,r,u,bB] * Y[bB,p,d]
-
-    _strip_v!(gp, ix, iy, Afull, Bfull)
 
     _recanonicalise_v!(gp, ix, iy, Afull, Bfull, D_max)
     apply_mask!(gp, ix, iy); apply_mask!(gp, ix, iy+1)
@@ -306,6 +319,21 @@ function _recanonicalise_v!(gp, ix, iy, D, U, D_max)
     Dnew = permutedims(Draw, (1,2,3,5,4))              # (p,l,r,β,d)
     Utmp = reshape(Vt, Dk, dpU, DlU, DrU, DuU)         # (β,p,l,r,u)
     Unew = permutedims(Utmp, (2,3,4,5,1))              # (p,l,r,u,β)
+
+    # Peel transverse sqrt-weights to recover Vidal Γ (down: l,r,d; up: l,r,u).
+    isq(λ) = 1.0 ./ (sqrt.(λ) .+ FU_REG)
+    ilD = (ix > 1)        ? isq(peps.λh[ix-1, iy])   : ones(1)
+    irD = (ix < nx(gp))   ? isq(peps.λh[ix,   iy])   : ones(1)
+    idD = (iy > 1)        ? isq(peps.λv[ix, iy-1])   : ones(1)
+    ilU = (ix > 1)        ? isq(peps.λh[ix-1, iy+1]) : ones(1)
+    irU = (ix < nx(gp))   ? isq(peps.λh[ix,   iy+1]) : ones(1)
+    iuU = (iy+1 < ny(gp)) ? isq(peps.λv[ix, iy+1])   : ones(1)
+    @inbounds for d in 1:DdD, u in 1:Dk, r in 1:DrD, l in 1:DlD, p in 1:dpD
+        Dnew[p,l,r,u,d] *= ilD[l] * irD[r] * idD[d]
+    end
+    @inbounds for d in 1:Dk, u in 1:DuU, r in 1:DrU, l in 1:DlU, p in 1:dpU
+        Unew[p,l,r,u,d] *= ilU[l] * irU[r] * iuU[u]
+    end
 
     peps.tensors[ix, iy]   = Dnew
     peps.tensors[ix, iy+1] = Unew
