@@ -45,11 +45,13 @@
    carried separately by a bond-2 ramp MPO.
 
    ── Odd kernel ───────────────────────────────────────────────────────────────
-   Each channel kernel is the GRADIENT of a potential, hence ANTISYMMETRIC about
-   the source: M(d) ≈ −M(−d).  We fit the one-sided rightward kernel (d ≥ 0) and
-   extend it antisymmetrically; the rightward fit needs only the DECAYING root
-   λ = 2−√3 (the growing 2+√3 partner is the reflected wave reproduced by the
-   finite-chain MPO's boundary tensors).
+   Each channel kernel is the GRADIENT of a potential, hence antisymmetric — but
+   a forward-difference link (x→x+1) sits at the HALF-INTEGER position x+½, so
+   the reflection center is d = −½:  M(d) = −M(−1−d), not −M(−d).  We fit the
+   one-sided rightward kernel (d ≥ 0) and extend by this half-shifted reflection;
+   the rightward fit needs only the DECAYING root λ = 2−√3 (the growing 2+√3
+   partner is the reflected wave reproduced by the finite-chain MPO's boundary
+   tensors).
 
    ── Method ───────────────────────────────────────────────────────────────────
    Massive channel (A←A), bulk pairs (both endpoints ≥ `edge` from a boundary):
@@ -211,9 +213,11 @@ Fit the BULK (interior) one-sided kernel of a transverse channel by an affine
 baseline plus K exponentials, M(d) ≈ a + b·d + Σ_k c_k λ_k^{d} (d ≥ 0), extended
 antisymmetrically.  Rates λ_k come from Prony on the SECOND DIFFERENCE of the
 bulk-averaged sequence (which annihilates the affine baseline); amplitudes from
-a global least-squares in {1, d, λ_k^d}.  `max_err` is the worst residual over
-the BULK pairs only — boundary reflections are deliberately excluded because the
-finite-chain MPO reproduces them from the same rates."""
+a global least-squares in {1, d, λ_k^d}.  The leftward branch uses the
+half-shifted antisymmetric extension M(d) = −M(−1−d) (forward-difference links
+sit at x+½).  `max_err` is the worst residual over the BULK pairs only —
+boundary reflections are deliberately excluded because the finite-chain MPO
+reproduces them from the same rates."""
 function fit_channel(geo::LadderGeometry, M::AbstractMatrix,
                      link_mode::Symbol, src_mode::Symbol;
                      K::Int, i::Int=1, edge::Int=bulk_edge(geo))
@@ -246,10 +250,13 @@ function fit_channel(geo::LadderGeometry, M::AbstractMatrix,
     a, b = sol[1], sol[2]
     c    = sol[3:end]
 
+    # Forward-difference links sit at the half-integer position x+½, so the
+    # gradient field is antisymmetric about d = −½:  M(d) = −M(−1−d), NOT −M(−d).
+    # The leftward partner of d=k (k≥0) is d=−1−k.
     S(d) = a + b * d + sum(c[k] * λ[k]^d for k in 1:Keff)
     max_err = 0.0
     for (d, v) in bulk
-        pred = d ≥ 0 ? S(d) : -S(-d)
+        pred = d ≥ 0 ? S(d) : -S(-1 - d)
         max_err = max(max_err, abs(pred - v))
     end
     return ExpFit(link_mode, src_mode, i, a, b, c, λ, max_err, Keff)
