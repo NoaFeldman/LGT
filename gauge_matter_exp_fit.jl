@@ -15,14 +15,20 @@
    transverse modes, the longitudinal kernel of each mode obeys a 1D screened
    Poisson equation (−Δ_x + m²):
 
-     • symmetric  (m²=0): the gradient of the massless ramp is ~constant ⇒ λ ≈ 1.
+     • symmetric  (m²=0): the gradient of the massless Green's function (with a
+            uniform neutralizing background charge) is AFFINE in x, i.e. a
+            constant + linear ramp ⇒ a CONFLUENT root at λ = 1.  A polynomial×λ^d
+            term is NOT representable by a sum of distinct exponentials, so we
+            fit it with an explicit affine baseline  a + b·d  instead.
      • antisymmetric (m²=2): evanescent waves with cosh θ = 1 + m²/2 = 2 ⇒
             λ_± = e^{∓θ} = 2 ∓ √3  ≈ 0.2679 and 3.732.
        On a FINITE open chain the two reflected waves λ^{|x−x'|} and λ^{−|x−x'|}
        combine into the boundary-induced hyperbolic-sine (sinh/cosh) profile.
 
-   Hence K = 3 exponentials  {1, 2−√3, 2+√3}  already reproduce the kernel to
-   high accuracy; `validate_exp_fit` checks the fitted λ_k against 2−√3.
+   Hence the kernel is  (affine baseline a + b·d)  +  K genuine exponentials
+   {2−√3, 2+√3, …}; `validate_exp_fit` checks the fitted λ_k against 2−√3.  The
+   λ_k are extracted from the SECOND DIFFERENCE of the sequence (which kills the
+   affine baseline) so the massless mode cannot contaminate the rate estimate.
 
    ── Odd kernel ───────────────────────────────────────────────────────────────
    M is the GRADIENT of G, so it is ANTISYMMETRIC about the source:
@@ -120,24 +126,42 @@ function _collect_pairs(geo::LadderGeometry, M::AbstractMatrix, y::Int, yp::Int,
     return pairs
 end
 
-"""Result of one (y,y',i) exponential fit."""
+"""Result of one (y,y',i) exponential fit.
+
+Model (rightward branch, d = x−x' ≥ 0), extended antisymmetrically for d < 0:
+
+    M(d)  ≈  a + b·d  +  Σ_k c_k λ_k^{d}
+
+The affine term `a + b·d` is the confluent λ=1 (massless / symmetric transverse
+mode) longitudinal background; the `λ_k` are the genuine evanescent exponentials
+(antisymmetric mode, λ = 2−√3, plus its boundary-reflected partner)."""
 struct ExpFit
     y       :: Int
     yp      :: Int
     i       :: Int
-    c       :: Vector{ComplexF64}     # amplitudes
-    λ       :: Vector{ComplexF64}     # decay parameters
-    max_err :: Float64                # max |Σ c_k λ_k^{|x−x'|} − M| over all pairs
+    a       :: ComplexF64             # affine baseline: constant term
+    b       :: ComplexF64             # affine baseline: linear (ramp) slope
+    c       :: Vector{ComplexF64}     # exponential amplitudes
+    λ       :: Vector{ComplexF64}     # exponential decay parameters
+    max_err :: Float64                # max |model − M| over all pairs (odd-extended)
     K       :: Int
 end
 
 """
     fit_one(geo, M, y, yp, i; K) → ExpFit
 
-Fit the one-sided (rightward, d = x−x' ≥ 0) kernel
-    M[link(x,y,i), src(x',y')]  ≈  Σ_k c_k λ_k^{d}      (d ≥ 0)
-by K exponentials, and extend antisymmetrically (M(−d) = −M(d)) for d < 0.
-`max_err` is the worst absolute residual over ALL pairs under this odd model.
+Fit the one-sided (rightward, d = x−x' ≥ 0) kernel by an AFFINE baseline plus K
+genuine exponentials,
+
+    M[link(x,y,i), src(x',y')]  ≈  a + b·d + Σ_k c_k λ_k^{d}      (d ≥ 0)
+
+and extend antisymmetrically (M(−d) = −M(d)) for d < 0.
+
+The exponential rates λ_k are obtained by Prony on the SECOND DIFFERENCE Δ²f
+(which annihilates the affine baseline, Δ²(a+b·d)=0, but maps λ^d ↦ λ^d(λ−1)²),
+so the massless symmetric mode no longer contaminates the rate estimation.  The
+amplitudes (a, b, c_k) then come from one global least-squares in the basis
+{1, d, λ_k^d}.  `max_err` is the worst absolute residual over ALL pairs.
 """
 function fit_one(geo::LadderGeometry, M::AbstractMatrix, y::Int, yp::Int, i::Int; K::Int)
     pairs = _collect_pairs(geo, M, y, yp, i)
@@ -151,23 +175,31 @@ function fit_one(geo::LadderGeometry, M::AbstractMatrix, y::Int, yp::Int, i::Int
     @assert all(fcnt .> 0) "fit_one: gap in rightward offsets — geometry issue"
     f = fsum ./ fcnt
 
-    Keff = min(K, length(f) ÷ 2)                  # need ≥ 2K samples
-    c, λ = prony_fit(f, Keff)
+    # Second difference removes the affine (λ=1) baseline; Prony on it returns the
+    # genuine exponential rates λ_k unchanged (Δ² only rescales their amplitudes).
+    Δ2 = [f[d+3] - 2f[d+2] + f[d+1] for d in 0:dmax-2]   # length dmax-1
+    Keff = max(1, min(K, length(Δ2) ÷ 2))                # need ≥ 2K samples
+    _, λ = prony_fit(Δ2, Keff)
 
-    # global least-squares refinement of c over the rightward pairs
-    rp = [(d, v) for (d, v) in pairs if d ≥ 0]
-    D  = ComplexF64[λ[k]^d for (d, _) in rp, k in 1:Keff]
-    c  = D \ ComplexF64[v for (_, v) in rp]
+    # global least-squares for (a, b, c_k) in the basis {1, d, λ_k^d} over d ≥ 0
+    rp  = [(d, v) for (d, v) in pairs if d ≥ 0]
+    A   = ComplexF64[ j == 1 ? 1.0 :
+                      j == 2 ? ComplexF64(d) :
+                      λ[j-2]^d
+                      for (d, _) in rp, j in 1:(2 + Keff) ]
+    sol = A \ ComplexF64[v for (_, v) in rp]
+    a, b = sol[1], sol[2]
+    c    = sol[3:end]
 
     # worst residual over ALL pairs, with antisymmetric extension for d < 0
-    S(d) = sum(c[k] * λ[k]^d for k in 1:Keff)
+    S(d) = a + b * d + sum(c[k] * λ[k]^d for k in 1:Keff)
     max_err = 0.0
     for (d, v) in pairs
         pred = d ≥ 0 ? S(d) : -S(-d)
         max_err = max(max_err, abs(pred - v))
     end
 
-    return ExpFit(y, yp, i, c, λ, max_err, Keff)
+    return ExpFit(y, yp, i, a, b, c, λ, max_err, Keff)
 end
 
 """
@@ -214,8 +246,8 @@ function validate_exp_fit(N::Int; K::Int=3, i::Int=1, tol::Float64=1e-6)
         worst = max(worst, F.max_err)
         λr = round.(real.(F.λ); digits=4)
         λi = round.(imag.(F.λ); digits=4)
-        @printf("  (y=%d←y'=%d): max_err=%.2e   λ = %s%s\n",
-                y, yp, F.max_err, string(λr),
+        @printf("  (y=%d←y'=%d): max_err=%.2e   a=%+.4f b=%+.4f   λ = %s%s\n",
+                y, yp, F.max_err, real(F.a), real(F.b), string(λr),
                 all(abs.(imag.(F.λ)) .< 1e-8) ? "" : " + i" * string(λi))
         if any(abs.(F.λ .- λ_anti) .< 1e-3) || any(abs.(F.λ .- 1/λ_anti) .< 1e-2)
             found_anti = true
@@ -224,7 +256,7 @@ function validate_exp_fit(N::Int; K::Int=3, i::Int=1, tol::Float64=1e-6)
     @printf("  worst max_err over all rung pairs = %.2e\n", worst)
     ok_err  = worst < tol
     println(ok_err     ? "  PASS: fit accurate to tol=$tol" :
-                         "  WARN: fit error exceeds tol (increase K or N)")
+                         "  WARN: fit error exceeds tol (raise K, or check affine baseline)")
     println(found_anti ? "  PASS: recovered boundary sinh scale λ=2−√3" :
                          "  WARN: antisymmetric-mode scale not found")
     return ok_err && found_anti
