@@ -203,15 +203,16 @@ function build_exponent_mpo(geo::LadderGeometry, channels::Vector{GeoChannel};
             w[cα, cα, :, :] .= ch.sl .* Id        # constant carrier self-loop
 
             this_kind = e.kind == :site ? :vertex : :link
-            # OPEN: start → carrier, deposit the open operator with its weight
+            # OPEN: start → carrier, deposit the open operator with its weight.
+            # Bond flows left→right (b₀=START … bₙ=DONE): open is W[START,cα].
             if this_kind == ch.open_kind
                 op = locop(e, ch.open_op)
-                w[cα, START, :, :] .+= ch.open_w(e.x, e.y) .* op
+                w[START, cα, :, :] .+= ch.open_w(e.x, e.y) .* op
             end
-            # CLOSE: carrier → done, deposit the close operator with its weight
+            # CLOSE: carrier → done, deposit the close operator with its weight.
             if this_kind == ch.close_kind
                 op = locop(e, ch.close_op)
-                w[DONE, cα, :, :] .+= ch.close_w(e.x, e.y) .* op
+                w[cα, DONE, :, :] .+= ch.close_w(e.x, e.y) .* op
             end
         end
         W[p] = w
