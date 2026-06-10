@@ -59,8 +59,8 @@ Matter charge operator on a vertex site (single hardcore mode: empty/occupied).
 Frobenius extraction of MPO coefficients is contaminated only by genuine
 two-body terms (identity-carrying bond states give tr(Q)=0)."""
 function charge_operator(; centered::Bool=true)
-    Q = Diagonal(Float64[0, 1]) |> Matrix
-    centered && (Q .-= (tr(Q) / size(Q, 1)) * I)
+    Q = Matrix(Diagonal(Float64[0, 1]))
+    centered && (Q = Q - (tr(Q) / size(Q, 1)) * Matrix(I, size(Q)...))
     return Q
 end
 
@@ -76,31 +76,8 @@ function link_phase_operator(d::Int; centered::Bool=true)
     @assert d ≥ 2 "photon cutoff dimension d must be ≥ 2"
     U = diagm(-1 => ones(Float64, d - 1))      # lowering: |E⟩ ← |E+1⟩
     φ = 0.5 * (U + U')                          # Hermitian angle operator
-    centered && (φ .-= (tr(φ) / d) * I)         # already traceless, kept for safety
+    centered && (φ = φ - (tr(φ) / d) * Matrix(I, d, d))   # traceless (already is)
     return Matrix(φ)
-end
-
-# ╔═══════════════════════════════════════════════════════════════════════════╗
-# ║  Chain bookkeeping: column index + per-column last site                  ║
-# ╚═══════════════════════════════════════════════════════════════════════════╝
-
-"""Column index of a chain element (the snake processes columns left→right)."""
-column_of(e::ChainElement) = e.x
-
-"""
-    chain_columns(geo) → (col, is_col_last)
-
-`col[p]`         = column of chain site p;
-`is_col_last[p]` = true iff p is the final chain site of its column (the point at
-                   which a carrier "ticks", i.e. multiplies by λ on the way out)."""
-function chain_columns(geo::LadderGeometry)
-    col = [column_of(e) for e in geo.chain]
-    n = length(col)
-    is_col_last = falses(n)
-    for p in 1:n
-        is_col_last[p] = (p == n) || (col[p+1] != col[p])
-    end
-    return col, is_col_last
 end
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -109,40 +86,62 @@ end
 
 σrow(y::Int) = y == 1 ? 1.0 : -1.0             # antisymmetric-mode row sign
 
-"""
-    reconstruct_M_horizontal(geo, fits, ramp) → (Mr, max_err)
+"""Parameters of the analytic horizontal-link kernel model (the MPO's exact
+target).  Massive: amplitude `c`, rate `λ` (=2−√3).  Massless: continuous affine
+background `a0 + q·x + r·x'` plus a Heaviside step `s·𝟙(x≥x')`."""
+struct HModel
+    c  :: Float64
+    λ  :: Float64
+    a0 :: Float64
+    q  :: Float64
+    r  :: Float64
+    s  :: Float64
+end
 
-Rebuild the horizontal-link block of the shift field purely from the Stage-2
-channel parameters, using
-
-    M[link(x,yl,1), vert(x',ys)] = ½ v_SS(x,x') + ½ σ(yl)σ(ys) v_AA(x,x'),
-
-with v_SS the affine ramp (p,q,r) and v_AA the massive single-exponential kernel
-(amplitude c, rate λ, half-integer antisymmetric extension v(d) = −v(−1−d)).
-Compares to the exact `shift_field` on horizontal rows and returns the rebuilt
-matrix plus the max abs error — this isolates the DECOMPOSITION from the MPO."""
-function reconstruct_M_horizontal(geo::LadderGeometry,
-                                  FA::ExpFit, ramp::NTuple{3,Float64})
-    M = shift_field(geo)
-    p, q, r = ramp
+"""Extract the model parameters from the Stage-2 channel fits for a given N."""
+function horizontal_model(geo::LadderGeometry; K::Int=3)
+    M  = shift_field(geo)
+    FA = fit_channel(geo, M, :A, :A; K=K)
     λ_anti = 2 - sqrt(3)
     kdom = argmin(abs.(FA.λ .- λ_anti))
     c = real(FA.c[kdom]); λ = real(FA.λ[kdom])
+    a0, q, r, s, _ = symmetric_ramp_step(geo, M)
+    return HModel(c, λ, a0, q, r, s)
+end
 
-    v_SS(x, xp) = p + q * x + r * xp
-    Sd(d) = c * λ^d                                   # rightward (d ≥ 0)
-    v_AA(x, xp) = (x - xp) ≥ 0 ? Sd(x - xp) : -Sd(-(x - xp) - 1)
+"""Massive (antisymmetric) kernel with half-integer odd extension v(d)=−v(−1−d)."""
+v_AA(m::HModel, x::Int, xp::Int) = (x - xp) ≥ 0 ? m.c * m.λ^(x - xp) :
+                                                  -m.c * m.λ^(xp - x - 1)
+"""Massless (symmetric) kernel: continuous affine background + source step."""
+v_SS(m::HModel, x::Int, xp::Int) = m.a0 + m.q * x + m.r * xp + (x ≥ xp ? m.s : 0.0)
 
+"""
+    analytic_M(geo, m) → Mr   (n_links × n_sites)
+
+Rebuild the horizontal-link block of the kernel purely from the model `m`:
+
+    M[link(x,yl,1), vert(x',ys)] = ½ v_SS(x,x') + ½ σ(yl)σ(ys) v_AA(x,x').
+
+This matrix is the EXACT target the FSA-compiled MPO must reproduce."""
+function analytic_M(geo::LadderGeometry, m::HModel)
     Mr = zeros(Float64, geo.n_links, geo.n_sites)
-    max_err = 0.0
     for x in 1:geo.N, yl in 1:2, xp in 1:geo.N + 1, ys in 1:2
-        ℓ = geo.link_id[(x, yl, 1)]
-        s = geo.vertex_id[(xp, ys)]
-        val = 0.5 * v_SS(x, xp) + 0.5 * σrow(yl) * σrow(ys) * v_AA(x, xp)
-        Mr[ℓ, s] = val
-        max_err = max(max_err, abs(val - M[ℓ, s]))
+        ℓ = geo.link_id[(x, yl, 1)]; s = geo.vertex_id[(xp, ys)]
+        Mr[ℓ, s] = 0.5 * v_SS(m, x, xp) + 0.5 * σrow(yl) * σrow(ys) * v_AA(m, x, xp)
     end
-    return Mr, max_err
+    return Mr
+end
+
+"""Max abs error of the analytic model vs the exact shift field, over horizontal
+links (the Stage-2 single-exponential TRUNCATION error, not an FSA error)."""
+function analytic_truncation_error(geo::LadderGeometry, m::HModel)
+    M = shift_field(geo); Mr = analytic_M(geo, m)
+    err = 0.0
+    for x in 1:geo.N, yl in 1:2, xp in 1:geo.N + 1, ys in 1:2
+        ℓ = geo.link_id[(x, yl, 1)]; s = geo.vertex_id[(xp, ys)]
+        err = max(err, abs(Mr[ℓ, s] - M[ℓ, s]))
+    end
+    return err
 end
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -152,15 +151,18 @@ end
 # Bond layout (size Dχ):  index 1 = "done", indices 2:Dχ−? = carriers, last =
 # "start".  We assemble W^[p] ∈ ℝ^{Dχ×Dχ} of d_p×d_p local operators.
 
-"""A geometric two-body channel for the FSA.
+"""A two-body channel for the FSA.
 
-Couples an `open` operator placed at sites of `open_kind` (with scalar weight
+Couples an `open` operator placed at sites of `open_kind` (scalar weight
 `open_w(x,y)`) to a `close` operator placed at sites of `close_kind` LATER on the
-chain (weight `close_w(x,y)`), with a carrier that multiplies by `λ` once per
-column tick between them.  Set `open_kind=:vertex, close_kind=:link` for the
-source→link (rightward) ordering and the reverse for link→source (leftward)."""
+chain (weight `close_w(x,y)`).  The carrier self-loop multiplies by the constant
+`sl` at every site (default 1).  Geometric distance dependence is NOT obtained by
+"ticking": instead the weights carry absolute-position factors λ^{∓x} so that
+open(x')·close(x) = λ^{x−x'} exactly, immune to within-column ordering.  Set
+`open_kind=:vertex, close_kind=:link` for source→link and the reverse for
+link→source."""
 struct GeoChannel
-    λ        :: Float64
+    sl         :: Float64       # carrier self-loop multiplier (1 for our channels)
     open_kind  :: Symbol        # :vertex or :link
     open_op    :: Symbol        # :Q or :phi
     open_w     :: Function      # (x,y) -> scalar
@@ -180,7 +182,6 @@ function build_exponent_mpo(geo::LadderGeometry, channels::Vector{GeoChannel};
                             d::Int=3,
                             Q::AbstractMatrix=charge_operator(),
                             φ::AbstractMatrix=link_phase_operator(d))
-    _, is_col_last = chain_columns(geo)
     nC = length(channels)
     Dχ = 2 + nC                                   # 1=done, 2:1+nC carriers, Dχ=start
     DONE, START = 1, Dχ
@@ -199,8 +200,7 @@ function build_exponent_mpo(geo::LadderGeometry, channels::Vector{GeoChannel};
 
         for (k, ch) in enumerate(channels)
             cα = carrier(k)
-            # carrier self-loop: tick by λ only when leaving the last site of a column
-            w[cα, cα, :, :] .= (is_col_last[p] ? ch.λ : 1.0) .* Id
+            w[cα, cα, :, :] .= ch.sl .* Id        # constant carrier self-loop
 
             this_kind = e.kind == :site ? :vertex : :link
             # OPEN: start → carrier, deposit the open operator with its weight
@@ -266,11 +266,13 @@ function mpo_coefficient(W::Vector{Array{Float64,4}}, geo::LadderGeometry,
 end
 
 """Reconstruct the full horizontal M̃[ℓ,s] from the assembled MPO and compare to
-the exact shift field; returns (M̃, max_err)."""
-function reconstruct_M_from_mpo(W::Vector{Array{Float64,4}}, geo::LadderGeometry;
+the target matrix `target` (default: the analytic model the MPO was built from,
+so the error measures FSA-tensor correctness, not Stage-2 truncation); returns
+(M̃, max_err)."""
+function reconstruct_M_from_mpo(W::Vector{Array{Float64,4}}, geo::LadderGeometry,
+                                target::AbstractMatrix;
                                 Q::AbstractMatrix=charge_operator(),
                                 φ::AbstractMatrix=link_phase_operator(size(W[2],3)))
-    M = shift_field(geo)
     Mt = zeros(Float64, geo.n_links, geo.n_sites)
     max_err = 0.0
     for x in 1:geo.N, yl in 1:2, xp in 1:geo.N + 1, ys in 1:2
@@ -278,7 +280,7 @@ function reconstruct_M_from_mpo(W::Vector{Array{Float64,4}}, geo::LadderGeometry
         ℓpos = geo.link_pos[(x, yl, 1)]; spos = geo.site_pos[(xp, ys)]
         v = mpo_coefficient(W, geo, ℓpos, spos; Q=Q, φ=φ)
         Mt[ℓ, s] = v
-        max_err = max(max_err, abs(v - M[ℓ, s]))
+        max_err = max(max_err, abs(v - target[ℓ, s]))
     end
     return Mt, max_err
 end
@@ -288,46 +290,48 @@ end
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
 """
-    horizontal_channels(FA, ramp) → Vector{GeoChannel}
+    horizontal_channels(m::HModel, x0) → Vector{GeoChannel}
 
 Build the FSA channels reproducing the full horizontal-link kernel
-    M[link(x,yl,1), vert(x',ys)] = ½(p+q·x+r·x') + ½σ(yl)σ(ys)·c·λ^{|…|}.
+    M[link(x,yl,1), vert(x',ys)] = ½ v_SS(x,x') + ½σ(yl)σ(ys)·v_AA(x,x'),
+with v_SS = a0+q·x+r·x' + s·𝟙(x≥x') and v_AA = c·λ^{|…|} (half-integer odd).
 
-Massive part (antisymmetric, decaying λ=2−√3), two chain orderings:
-  • rightward (vertex opens → link closes):  +½σ(ys)·cσ(yl)·λ^{x−x'};
-  • leftward  (link opens → vertex closes):  −½σ(ys)·cσ(yl)·λ^{x'−x−1}.
+Geometric distance is carried via absolute-position factors λ^{±(x−x0)} on the
+open/close weights (x0 = lattice midpoint, for numerical balance) with carrier
+self-loop sl=1; chain order alone selects the branch (vertex-before-link ⟺ x≥x').
 
-Massless ramp (symmetric, λ=1, couples EVERY pair in BOTH chain orders).  As a
-rank-1 product of global one-body sums the affine kernel splits into three
-pieces  ½p·(Σφ)(ΣQ) + ½q·(Σ xφ)(ΣQ) + ½r·(Σφ)(Σ xQ); φ (links) and Q (vertices)
-live on disjoint sites, so each piece needs ONE carrier per chain ordering
-(vertex-before-link and link-before-vertex), six in total.  A given (ℓ,s) pair
-has a definite chain order, so the two orderings cover it exactly once."""
-function horizontal_channels(FA::ExpFit, ramp::NTuple{3,Float64})
-    p, q, r = ramp
-    λ_anti = 2 - sqrt(3)
-    kdom = argmin(abs.(FA.λ .- λ_anti))
-    c = real(FA.c[kdom]); λ = real(FA.λ[kdom])
+Massive part (antisymmetric, decaying λ=2−√3), two orderings:
+  • rightward (vertex opens → link closes):  +½σ(ys)·cσ(yl)·λ^{x−x'}  (x ≥ x');
+  • leftward  (link opens → vertex closes):  −½σ(ys)·cσ(yl)·λ^{x'−x−1} (x < x').
+Massless CONTINUOUS affine background (λ=1, both orderings, 3 pieces × 2 = 6) and
+the massless STEP s·𝟙(x≥x') (one ordering, vertex-open/link-close)."""
+function horizontal_channels(m::HModel, x0::Float64)
+    c, λ, a0, q, r, s = m.c, m.λ, m.a0, m.q, m.r, m.s
+    gp(x) = λ^(x - x0)        # grows toward large x
+    gm(x) = λ^(-(x - x0))     # grows toward small x  (gp(x)*gm(x') = λ^{x−x'})
 
     chans = GeoChannel[]
-    # ── massive (decaying) ───────────────────────────────────────────────────
-    # rightward: source(vertex) opens → horizontal link closes  (x ≥ x')
-    push!(chans, GeoChannel(λ, :vertex, :Q,  (x, y) -> 0.5 * σrow(y),
-                                :link,   :phi,(x, y) -> c * σrow(y)))
-    # leftward: horizontal link opens → source(vertex) closes    (x < x')
-    push!(chans, GeoChannel(λ, :link,   :phi,(x, y) -> σrow(y),
-                                :vertex, :Q,  (x, y) -> -0.5 * (c / λ) * σrow(y)))
+    # ── massive (decaying), absolute-position factored ───────────────────────
+    # rightward: source(vertex,x') opens → link(x) closes   ⇒ ½σ(ys)·cσ(yl)·λ^{x−x'}
+    push!(chans, GeoChannel(1.0, :vertex, :Q,  (x, y) -> 0.5 * σrow(y) * gm(x),
+                                 :link,   :phi,(x, y) -> c * σrow(y) * gp(x)))
+    # leftward: link(x) opens → source(vertex,x') closes    ⇒ −½σ(ys)·cσ(yl)·λ^{x'−x−1}
+    push!(chans, GeoChannel(1.0, :link,   :phi,(x, y) -> σrow(y) * gm(x),
+                                 :vertex, :Q,  (x, y) -> -0.5 * c * σrow(y) * gp(x) / λ))
 
-    # ── massless affine ramp (λ=1), each rank-1 piece × both chain orderings ──
-    # ½p (Σφ)(ΣQ)
-    push!(chans, GeoChannel(1.0, :vertex,:Q,  (x, y) -> 0.5, :link,  :phi,(x, y) -> p))
-    push!(chans, GeoChannel(1.0, :link,  :phi,(x, y) -> p,   :vertex,:Q,  (x, y) -> 0.5))
+    # ── massless continuous affine (λ=1, sl=1), each piece × both orderings ──
+    # ½a0 (Σφ)(ΣQ)
+    push!(chans, GeoChannel(1.0, :vertex,:Q,  (x, y) -> 0.5, :link,  :phi,(x, y) -> a0))
+    push!(chans, GeoChannel(1.0, :link,  :phi,(x, y) -> a0,  :vertex,:Q,  (x, y) -> 0.5))
     # ½q (Σ xφ)(ΣQ)
     push!(chans, GeoChannel(1.0, :vertex,:Q,  (x, y) -> 0.5,    :link,  :phi,(x, y) -> q * x))
     push!(chans, GeoChannel(1.0, :link,  :phi,(x, y) -> q * x,  :vertex,:Q,  (x, y) -> 0.5))
     # ½r (Σφ)(Σ xQ)
     push!(chans, GeoChannel(1.0, :vertex,:Q,  (x, y) -> 0.5 * r * x, :link,  :phi,(x, y) -> 1.0))
     push!(chans, GeoChannel(1.0, :link,  :phi,(x, y) -> 1.0, :vertex,:Q,  (x, y) -> 0.5 * r * x))
+
+    # ── massless STEP s·𝟙(x≥x') (λ=1), one ordering: source opens → link closes
+    push!(chans, GeoChannel(1.0, :vertex,:Q,  (x, y) -> 0.5 * s, :link,  :phi,(x, y) -> 1.0))
     return chans
 end
 
@@ -342,35 +346,34 @@ Two-layer check on the horizontal-link exponent MPO:
   layer 1 — analytic channel reconstruction of M  (decomposition correctness);
   layer 2 — MPO coefficient extraction of M̃       (FSA-tensor correctness);
 plus a report of the MPO bond dimension (should be 2 + #channels ∝ K)."""
-function validate_decoupling_mpo(N::Int; d::Int=3, K::Int=3, tol::Float64=1e-6)
-    geo  = ladder_geometry(N)
-    M    = shift_field(geo)
-    FA   = fit_channel(geo, M, :A, :A; K=K)
-    pqr  = symmetric_ramp(geo, M)
-    ramp = (pqr[1], pqr[2], pqr[3])
+function validate_decoupling_mpo(N::Int; d::Int=3, K::Int=3, tol_fsa::Float64=1e-9)
+    geo = ladder_geometry(N)
+    m   = horizontal_model(geo; K=K)
+    Mr  = analytic_M(geo, m)                      # exact FSA target
 
     println("─── decoupling-MPO self-test (N=$N, d=$d) ───")
+    @printf("  model: c=%+.5f λ=%.5f | a0=%+.4f q=%+.4f r=%+.4f s=%+.4f\n",
+            m.c, m.λ, m.a0, m.q, m.r, m.s)
 
-    # layer 1: analytic decomposition
-    _, err1 = reconstruct_M_horizontal(geo, FA, ramp)
-    @printf("  layer-1 analytic channel reconstruction:  max_err = %.2e\n", err1)
-
-    # layer 2: MPO tensors
-    chans = horizontal_channels(FA, ramp)
+    # FSA: does the MPO reproduce its analytic target Mr exactly?
+    x0 = (geo.N + 2) / 2                          # column midpoint (numerical balance)
+    chans = horizontal_channels(m, x0)
     Q = charge_operator(); φ = link_phase_operator(d)
     W = build_exponent_mpo(geo, chans; d=d, Q=Q, φ=φ)
     Dχ = size(W[1], 1)
-    _, err2 = reconstruct_M_from_mpo(W, geo; Q=Q, φ=φ)
-    @printf("  layer-2 MPO coefficient reconstruction:    max_err = %.2e\n", err2)
-    @printf("  MPO bond dimension Dχ = %d   (= 2 + %d channels)\n", Dχ, length(chans))
+    _, err_fsa = reconstruct_M_from_mpo(W, geo, Mr; Q=Q, φ=φ)
+    @printf("  FSA: MPO vs analytic target   max_err = %.2e   (Dχ=%d = 2+%d channels)\n",
+            err_fsa, Dχ, length(chans))
 
-    ok1 = err1 < tol
-    ok2 = err2 < tol
-    println(ok1 ? "  PASS: analytic channel decomposition reproduces M" :
-                  "  WARN: channel decomposition error exceeds tol")
-    println(ok2 ? "  PASS: MPO reproduces the exponent kernel M" :
-                  "  WARN: MPO reconstruction error exceeds tol")
-    return ok1 && ok2
+    # Truncation: analytic model vs exact shift field (Stage-2 story).
+    err_trunc = analytic_truncation_error(geo, m)
+    @printf("  model vs exact shift field    max_err = %.2e   (single-exp truncation)\n",
+            err_trunc)
+
+    ok = err_fsa < tol_fsa
+    println(ok ? "  PASS: FSA-compiled MPO reproduces the exponent kernel to machine precision" :
+                 "  WARN: FSA error exceeds tol — check column-tick bookkeeping / signs")
+    return ok
 end
 
 # Demo / self-test when run directly.

@@ -284,6 +284,32 @@ function symmetric_ramp(geo::LadderGeometry, M::AbstractMatrix; i::Int=1)
     return sol[1], sol[2], sol[3], res
 end
 
+"""
+    symmetric_ramp_step(geo, M; i=1) → (a0, q, r, s, residual)
+
+Fit the symmetric (massless) channel over ALL pairs (both branches) as a
+CONTINUOUS affine background plus a Heaviside STEP at the source:
+
+    v_SS(x,x')  ≈  a0 + q·x + r·x'  +  s·𝟙(x ≥ x').
+
+The massless shift field is the gradient of a 1D Coulomb potential: a uniform
+linear background (a0,q,r — continuous across the source) plus a unit step where
+the link crosses the source charge.  This 4-parameter model is exact (residual
+~machine), and unlike `symmetric_ramp` it is valid on BOTH branches, which the
+decoupling MPO needs.  The rightward intercept is p = a0 + s."""
+function symmetric_ramp_step(geo::LadderGeometry, M::AbstractMatrix; i::Int=1)
+    pr = channel_pairs(geo, M, :S, :S; i=i)
+    A = Float64[ j == 1 ? 1.0 :
+                 j == 2 ? Float64(x) :
+                 j == 3 ? Float64(xp) :
+                 (x ≥ xp ? 1.0 : 0.0)
+                 for (_, x, xp, _) in pr, j in 1:4 ]
+    rhs = Float64[v for (_, _, _, v) in pr]
+    sol = A \ rhs
+    res = maximum(abs, A * sol - rhs)
+    return sol[1], sol[2], sol[3], sol[4], res
+end
+
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  Validation                                                              ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
