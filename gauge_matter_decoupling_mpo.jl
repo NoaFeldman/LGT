@@ -370,14 +370,17 @@ function geometric_kernel_channels!(chans::Vector{GeoChannel}, Kmat::AbstractMat
         A = [gens[g][1]^(link_cols[li] - x0) * gens[g][2]^(src_cols[si] - x0)
              for (li, si) in rows, g in eachindex(gens)]
         b = [Kmat[li, si] for (li, si) in rows]
-        # column-equilibrate: the reflection generators λ^{x+x'} span a huge
-        # dynamic range (cond ~1e13 by N=12), so normalize columns before solving
-        # and unscale the amplitudes — otherwise the LSQ loses all precision.
+        # column-equilibrate: the reflection generators λ^{x+x'} have huge column
+        # values, so normalize columns, solve, then unscale.  The equilibrated
+        # coefficient a_scaled[g] = a[g]·‖col_g‖ is the generator's CONTRIBUTION
+        # magnitude — drop on THAT, not the raw amplitude a[g] (a reflection
+        # generator legitimately has a tiny amplitude × huge values).
         scales = [norm(view(A, :, g)) for g in axes(A, 2)]
         scales = [s == 0 ? 1.0 : s for s in scales]
-        a = ((A ./ scales') \ b) ./ scales
+        a_scaled = (A ./ scales') \ b
+        a = a_scaled ./ scales
         for g in eachindex(gens)
-            abs(a[g]) < tol && continue
+            abs(a_scaled[g]) < tol && continue
             let μl = gens[g][1], μs = gens[g][2], ag = a[g],
                 lf = link_rowfac, sf = src_rowfac, xil = xil, xis = xis,
                 lk = link_kind, x0 = x0
