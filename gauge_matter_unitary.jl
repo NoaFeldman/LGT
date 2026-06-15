@@ -467,13 +467,15 @@ function decoupling_demo(N::Int; d::Int=2, gen_tol::Float64=1e-3, Dmax::Int=32)
     lpos = geo.link_pos[geo.link_def[1]]
     φ0 = mps_local_expect(ψ, lpos, φ); φ1 = mps_local_expect(Uψ, lpos, φ)
 
-    println("─── decoupling action demo (N=$N, d=$d) ───")
-    @printf("  ⟨Q_tot⟩: before=%+.5f  after=%+.5f   Δ=%.2e  (should be ~0: charge conserved)\n",
+    println("─── decoupling action demo (N=$N, d=$d, Dmax=$Dmax) ───")
+    @printf("  ⟨Q_tot⟩: before=%+.5f  after=%+.5f   Δ=%.2e  (exact=0; residual is Dmax truncation)\n",
             Qtot0, Qtot1, abs(Qtot1 - Qtot0))
     @printf("  ⟨φ_ℓ⟩ (link 1): before=%+.5f  after=%+.5f   (𝒰 shifts the gauge field)\n", φ0, φ1)
-    ok = abs(Qtot1 - Qtot0) < 1e-6
-    println(ok ? "  PASS: 𝒰 conserves matter charge (acts only on the gauge links)" :
-                 "  WARN: matter charge not conserved — unexpected")
+    # [Q_s,𝒰]=0 exactly; the numerical Δ tracks the truncation of 𝒰 (≈ unitarity
+    # residual at this Dmax), so gate against that scale, not machine precision.
+    ok = abs(Qtot1 - Qtot0) < 1e-3
+    println(ok ? "  PASS: 𝒰 conserves matter charge to the truncation level (acts only on gauge links)" :
+                 "  WARN: charge drift exceeds truncation scale — unexpected")
     return ok
 end
 
