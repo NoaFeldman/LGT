@@ -162,8 +162,8 @@ function mpo_compress!(W::CMPO; ε::Float64=1e-12, Dmax::Int=400)
         r = length(F.S)
         W[p] = permutedims(reshape(F.U, Dl, d, d, r), (1, 4, 2, 3))
         SV = Diagonal(F.S) * F.Vt
-        _, Dr2, _, _ = size(W[p+1])
-        W[p+1] = reshape(SV * reshape(W[p+1], Dr, Dr2 * d * d), r, Dr2, d, d)
+        _, Dr2, d2, _ = size(W[p+1])            # neighbour's OWN physical dim
+        W[p+1] = reshape(SV * reshape(W[p+1], Dr, Dr2 * d2 * d2), r, Dr2, d2, d2)
     end
     for p in n:-1:2
         Dl, Dr, d, _ = size(W[p])
@@ -171,9 +171,9 @@ function mpo_compress!(W::CMPO; ε::Float64=1e-12, Dmax::Int=400)
         s = F.S; keep = max(1, min(Dmax, count(>(ε * s[1]), s)))
         W[p] = permutedims(reshape(F.Vt[1:keep, :], keep, d, d, Dr), (1, 4, 2, 3))
         US = F.U[:, 1:keep] * Diagonal(s[1:keep])
-        Dl0, _, _, _ = size(W[p-1])
+        Dl0, _, d0, _ = size(W[p-1])            # neighbour's OWN physical dim
         W[p-1] = permutedims(reshape(reshape(permutedims(W[p-1], (1, 3, 4, 2)),
-                                             Dl0 * d * d, Dl) * US, Dl0, d, d, keep),
+                                             Dl0 * d0 * d0, Dl) * US, Dl0, d0, d0, keep),
                              (1, 4, 2, 3))
     end
     return W
@@ -259,8 +259,8 @@ function mps_compress!(ψ::CMPS; ε::Float64=1e-10, Dmax::Int=200)
         F = svd(reshape(permutedims(ψ[p], (1, 3, 2)), Dl * d, Dr)); r = length(F.S)
         ψ[p] = permutedims(reshape(F.U, Dl, d, r), (1, 3, 2))
         SV = Diagonal(F.S) * F.Vt
-        _, Dr2, _ = size(ψ[p+1])
-        ψ[p+1] = reshape(SV * reshape(ψ[p+1], Dr, Dr2 * d), r, Dr2, d)
+        _, Dr2, d2 = size(ψ[p+1])               # neighbour's OWN physical dim
+        ψ[p+1] = reshape(SV * reshape(ψ[p+1], Dr, Dr2 * d2), r, Dr2, d2)
     end
     for p in n:-1:2
         Dl, Dr, d = size(ψ[p])
@@ -268,9 +268,9 @@ function mps_compress!(ψ::CMPS; ε::Float64=1e-10, Dmax::Int=200)
         s = F.S; keep = max(1, min(Dmax, count(>(ε * s[1]), s)))
         ψ[p] = permutedims(reshape(F.Vt[1:keep, :], keep, d, Dr), (1, 3, 2))
         US = F.U[:, 1:keep] * Diagonal(s[1:keep])
-        Dl0, _, _ = size(ψ[p-1])
+        Dl0, _, d0 = size(ψ[p-1])               # neighbour's OWN physical dim
         ψ[p-1] = permutedims(reshape(reshape(permutedims(ψ[p-1], (1, 3, 2)),
-                                             Dl0 * d, Dl) * US, Dl0, d, keep), (1, 3, 2))
+                                             Dl0 * d0, Dl) * US, Dl0, d0, keep), (1, 3, 2))
     end
     return ψ
 end
