@@ -605,50 +605,63 @@ function mpo_to_dense(W::CMPO)
     return op[:, :, 1]
 end
 
-"""Mean Gauss-law violation ⟨Σ_i (G_i − g_i)²⟩ on an MPS (sector diagnostic)."""
+"""Gauss-law violation ⟨Σ_i (G_i − g_i)²⟩ on an MPS (≥0; ~0 ⇒ in target sector)."""
 function gauss_violation(ψ::CMPS, nx::Int, ny::Int, dg::Int, g_charges::AbstractMatrix)
     dims = node_dims(nx, ny, dg)
-    terms = gauss_penalty_terms(nx, ny, dg, g_charges, 1.0)   # Λ=1
+    terms = gauss_penalty_terms(nx, ny, dg, g_charges, 1.0)   # Λ=1: ⟨ΣG²−2gG⟩
     H = _assemble_mpo(dims, terms)
-    return real(mpo_expect(H, ψ)) / real(mps_overlap(ψ, ψ))   # + Σ g_i² omitted ⇒ shifted
+    shifted = real(mpo_expect(H, ψ)) / real(mps_overlap(ψ, ψ))
+    return shifted + sum(abs2, g_charges)                     # add back dropped Σ g_i²
 end
 
 """
-    selftest_mps_lgt(; nx, ny, dg, g, t, m, Λ, D)
+    selftest_mps_lgt(; nx, ny, dg, g, t, m, Λ, D, maxdense)
 
-Validate the solver on a small lattice: (1) the Gauss-penalized DMRG ground-state
-energy matches the lowest eigenvalue of the densely-contracted MPO; (2) the state
-sits in the target staggered sector.  Dense check feasible for nx·ny ≤ ~6 nodes."""
-function selftest_mps_lgt(; nx::Int=2, ny::Int=3, dg::Int=1, g::Float64=1.0,
-                          t::Float64=1.0, m::Float64=0.5, Λ::Float64=20.0, D::Int=60)
+Validate the solver.  If the full Hilbert dimension ≤ `maxdense`, the
+Gauss-penalized DMRG ground-state energy is checked against the lowest eigenvalue
+of the densely-contracted MPO (the strong correctness gate, e.g. 2×2).  For
+larger lattices the dense matrix is infeasible (2×3 is already 1.4e5²), so we
+instead report the DMRG energy and the Gauss-sector diagnostic ⟨Σ(G−g)²⟩, which
+must be ≈0 (the penalty selected the target sector and DMRG converged)."""
+function selftest_mps_lgt(; nx::Int=2, ny::Int=2, dg::Int=1, g::Float64=1.0,
+                          t::Float64=1.0, m::Float64=0.5, Λ::Float64=20.0, D::Int=60,
+                          maxdense::Int=4096)
     println("─── MPS-LGT self-test ($(nx)×$(ny), dg=$dg, g=$g, t=$t, m=$m) ───")
     dims = node_dims(nx, ny, dg)
+    ND = prod(BigInt.(dims))
     gch = staggered_charges(nx, ny)
     Hpen = build_penalized_H(nx, ny, dg; g=g, t=t, m=m, gauss_g=gch, Λ=Λ)
-    @printf("  penalized-H MPO max bond = %d\n", maximum(size(W, 2) for W in Hpen))
+    @printf("  Hilbert dim = %s   penalized-H MPO max bond = %d\n",
+            string(ND), maximum(size(W, 2) for W in Hpen))
 
     Edmrg, ψ = dmrg_ground_state(Hpen, dims; D=D, nsweeps=8, verbose=true)
-
-    Hd = mpo_to_dense(Hpen)
-    Eexact = real(eigvals(Hermitian(Matrix(Hd)))[1])
     Hbare = _assemble_mpo(dims, lgt_terms(nx, ny, dg; g=g, t=t, m=m))
     Ebare = real(mpo_expect(Hbare, ψ)) / real(mps_overlap(ψ, ψ))
     viol  = gauss_violation(ψ, nx, ny, dg, gch)
-
-    @printf("  DMRG E(penalized) = %.8f   dense lowest = %.8f   |Δ| = %.2e\n",
-            Edmrg, Eexact, abs(Edmrg - Eexact))
-    @printf("  bare-H energy ⟨ψ|H|ψ⟩ = %.8f   Gauss penalty ⟨Σ(G−g)²⟩(shifted) = %.2e\n",
+    @printf("  bare-H energy ⟨ψ|H|ψ⟩ = %.8f   Gauss violation ⟨Σ(G−g)²⟩ = %.2e\n",
             Ebare, viol)
-    ok = abs(Edmrg - Eexact) < 1e-5
-    println(ok ? "  PASS: DMRG reproduces the dense ground-state energy" :
-                 "  WARN: DMRG energy disagrees with dense diagonalization")
-    return ok
+
+    if ND ≤ maxdense
+        Eexact = real(eigvals(Hermitian(Matrix(mpo_to_dense(Hpen))))[1])
+        @printf("  DMRG E(penalized) = %.8f   dense lowest = %.8f   |Δ| = %.2e\n",
+                Edmrg, Eexact, abs(Edmrg - Eexact))
+        ok = abs(Edmrg - Eexact) < 1e-5 && viol < 1e-3
+        println(ok ? "  PASS: DMRG reproduces the dense ground state (and is in-sector)" :
+                     "  WARN: DMRG disagrees with dense diagonalization / wrong sector")
+        return ok
+    else
+        @printf("  DMRG E(penalized) = %.8f   (dense check skipped: Hilbert dim too large)\n", Edmrg)
+        ok = viol < 1e-3
+        println(ok ? "  PASS: DMRG converged in the target Gauss sector (⟨Σ(G−g)²⟩≈0)" :
+                     "  WARN: state left the target sector — raise Λ or nsweeps")
+        return ok
+    end
 end
 
 # Demo / self-test when run directly.
 if abspath(PROGRAM_FILE) == @__FILE__
-    selftest_mps_lgt(; nx=2, ny=2)
+    selftest_mps_lgt(; nx=2, ny=2)   # dense correctness gate
     println()
-    selftest_mps_lgt(; nx=2, ny=3)
+    selftest_mps_lgt(; nx=2, ny=3)   # sector diagnostic only (dense infeasible)
     println()
 end
