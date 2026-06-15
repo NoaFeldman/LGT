@@ -202,7 +202,7 @@ function build_exponent_mpo(geo::LadderGeometry, channels::Vector{GeoChannel};
             cα = carrier(k)
             w[cα, cα, :, :] .= ch.sl .* Id        # constant carrier self-loop
 
-            this_kind = e.kind == :site ? :vertex : :link
+            this_kind = e.kind == :site ? :vertex : (e.i == 1 ? :hlink : :vlink)
             # OPEN: start → carrier, deposit the open operator with its weight.
             # Bond flows left→right (b₀=START … bₙ=DONE): open is W[START,cα].
             if this_kind == ch.open_kind
@@ -315,25 +315,151 @@ function horizontal_channels(m::HModel, x0::Float64)
     # ── massive (decaying), absolute-position factored ───────────────────────
     # rightward: source(vertex,x') opens → link(x) closes   ⇒ ½σ(ys)·cσ(yl)·λ^{x−x'}
     push!(chans, GeoChannel(1.0, :vertex, :Q,  (x, y) -> 0.5 * σrow(y) * gm(x),
-                                 :link,   :phi,(x, y) -> c * σrow(y) * gp(x)))
+                                 :hlink,  :phi,(x, y) -> c * σrow(y) * gp(x)))
     # leftward: link(x) opens → source(vertex,x') closes    ⇒ −½σ(ys)·cσ(yl)·λ^{x'−x−1}
-    push!(chans, GeoChannel(1.0, :link,   :phi,(x, y) -> σrow(y) * gm(x),
+    push!(chans, GeoChannel(1.0, :hlink,  :phi,(x, y) -> σrow(y) * gm(x),
                                  :vertex, :Q,  (x, y) -> -0.5 * c * σrow(y) * gp(x) / λ))
 
     # ── massless continuous affine (λ=1, sl=1), each piece × both orderings ──
     # ½a0 (Σφ)(ΣQ)
-    push!(chans, GeoChannel(1.0, :vertex,:Q,  (x, y) -> 0.5, :link,  :phi,(x, y) -> a0))
-    push!(chans, GeoChannel(1.0, :link,  :phi,(x, y) -> a0,  :vertex,:Q,  (x, y) -> 0.5))
+    push!(chans, GeoChannel(1.0, :vertex,:Q,  (x, y) -> 0.5, :hlink, :phi,(x, y) -> a0))
+    push!(chans, GeoChannel(1.0, :hlink, :phi,(x, y) -> a0,  :vertex,:Q,  (x, y) -> 0.5))
     # ½q (Σ xφ)(ΣQ)
-    push!(chans, GeoChannel(1.0, :vertex,:Q,  (x, y) -> 0.5,    :link,  :phi,(x, y) -> q * x))
-    push!(chans, GeoChannel(1.0, :link,  :phi,(x, y) -> q * x,  :vertex,:Q,  (x, y) -> 0.5))
+    push!(chans, GeoChannel(1.0, :vertex,:Q,  (x, y) -> 0.5,    :hlink, :phi,(x, y) -> q * x))
+    push!(chans, GeoChannel(1.0, :hlink, :phi,(x, y) -> q * x,  :vertex,:Q,  (x, y) -> 0.5))
     # ½r (Σφ)(Σ xQ)
-    push!(chans, GeoChannel(1.0, :vertex,:Q,  (x, y) -> 0.5 * r * x, :link,  :phi,(x, y) -> 1.0))
-    push!(chans, GeoChannel(1.0, :link,  :phi,(x, y) -> 1.0, :vertex,:Q,  (x, y) -> 0.5 * r * x))
+    push!(chans, GeoChannel(1.0, :vertex,:Q,  (x, y) -> 0.5 * r * x, :hlink, :phi,(x, y) -> 1.0))
+    push!(chans, GeoChannel(1.0, :hlink, :phi,(x, y) -> 1.0, :vertex,:Q,  (x, y) -> 0.5 * r * x))
 
     # ── massless STEP s·𝟙(x≥x') (λ=1), one ordering: source opens → link closes
-    push!(chans, GeoChannel(1.0, :vertex,:Q,  (x, y) -> 0.5 * s, :link,  :phi,(x, y) -> 1.0))
+    push!(chans, GeoChannel(1.0, :vertex,:Q,  (x, y) -> 0.5 * s, :hlink, :phi,(x, y) -> 1.0))
     return chans
+end
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  Data-driven channels: geometric (massive) + affine ramp (massless)      ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+#
+# A masked one-ordering exponential kernel is FULL rank, so SVD would inflate the
+# bond.  The compact representation is semiseparable: each exponential generator
+# μ_link^x · μ_src^{x'} is ONE geometric FSA channel (carrier sl=1, absolute
+# weights).  We least-squares-fit each chain-ordered kernel block to the four
+# generators {λ,1/λ}×{λ,1/λ} — bulk (λ^{|x−x'|}) plus both boundary reflections
+# (λ^{x+x'}, λ^{−x−x'}) — capturing the finite-size kernel far better than a
+# single bulk exponential.  All fits act on the RAW shift field, so they work at
+# any N (no N≳12 bulk fit needed).
+
+"""Least-squares-fit a chain-ordered kernel `Kmat[link_col,src_col]` to geometric
+generators and push the resulting channels.  `after[li,si]` selects the block
+where the link is chain-AFTER the source (source opens, link closes); the
+complement is the reverse ordering.  `link_rowfac`/`src_rowfac` apply the
+transverse row sign (σ for the antisymmetric mode, masks for a fixed source row);
+weights are centered at `x0` for numerical balance."""
+function geometric_kernel_channels!(chans::Vector{GeoChannel}, Kmat::AbstractMatrix,
+                                    link_cols::Vector{Int}, src_cols::Vector{Int},
+                                    after::AbstractMatrix{Bool},
+                                    link_kind::Symbol, link_rowfac, src_rowfac,
+                                    λ::Float64, x0::Float64; tol::Float64=1e-8)
+    gens = [(a, b) for a in (λ, 1 / λ) for b in (λ, 1 / λ)]   # (μ_link, μ_src)
+    xil = Dict(x => k for (k, x) in enumerate(link_cols))
+    xis = Dict(x => k for (k, x) in enumerate(src_cols))
+    for (mask, source_opens) in ((after, true), (.!after, false))
+        rows = [(li, si) for li in eachindex(link_cols)
+                         for si in eachindex(src_cols) if mask[li, si]]
+        isempty(rows) && continue
+        A = [gens[g][1]^(link_cols[li] - x0) * gens[g][2]^(src_cols[si] - x0)
+             for (li, si) in rows, g in eachindex(gens)]
+        a = A \ [Kmat[li, si] for (li, si) in rows]
+        for g in eachindex(gens)
+            abs(a[g]) < tol && continue
+            let μl = gens[g][1], μs = gens[g][2], ag = a[g],
+                lf = link_rowfac, sf = src_rowfac, xil = xil, xis = xis,
+                lk = link_kind, x0 = x0
+                linkw = (x, y) -> (haskey(xil, x) ? lf(y) * μl^(x - x0) : 0.0)
+                srcw  = (x, y) -> (haskey(xis, x) ? sf(y) * ag * μs^(x - x0) : 0.0)
+                if source_opens
+                    push!(chans, GeoChannel(1.0, :vertex, :Q, srcw, lk, :phi, linkw))
+                else
+                    push!(chans, GeoChannel(1.0, lk, :phi, linkw, :vertex, :Q, srcw))
+                end
+            end
+        end
+    end
+    return chans
+end
+
+"""The seven massless (λ=1) affine-ramp + step channels for horizontal links,
+reproducing ½(a0+q·x+r·x') for all pairs plus ½s·𝟙(x≥x')."""
+function affine_step_channels!(chans::Vector{GeoChannel}, a0, q, r, s)
+    push!(chans, GeoChannel(1.0, :vertex,:Q,  (x, y) -> 0.5, :hlink, :phi,(x, y) -> a0))
+    push!(chans, GeoChannel(1.0, :hlink, :phi,(x, y) -> a0,  :vertex,:Q,  (x, y) -> 0.5))
+    push!(chans, GeoChannel(1.0, :vertex,:Q,  (x, y) -> 0.5,    :hlink, :phi,(x, y) -> q * x))
+    push!(chans, GeoChannel(1.0, :hlink, :phi,(x, y) -> q * x,  :vertex,:Q,  (x, y) -> 0.5))
+    push!(chans, GeoChannel(1.0, :vertex,:Q,  (x, y) -> 0.5 * r * x, :hlink, :phi,(x, y) -> 1.0))
+    push!(chans, GeoChannel(1.0, :hlink, :phi,(x, y) -> 1.0, :vertex,:Q,  (x, y) -> 0.5 * r * x))
+    push!(chans, GeoChannel(1.0, :vertex,:Q,  (x, y) -> 0.5 * s, :hlink, :phi,(x, y) -> 1.0))
+    return chans
+end
+
+"""
+    ladder_channels(geo, M; λ, tol) → Vector{GeoChannel}
+
+Full data-driven channel set reproducing the ENTIRE shift field M (horizontal
+AND vertical links) from the raw matrix:
+  • horizontal massive (antisymmetric): geometric generators, row factor σ;
+  • horizontal massless (symmetric): affine ramp + step (a0,q,r,s);
+  • vertical links: geometric generators per source row (the rung difference
+    annihilates the massless mode, so vertical is purely massive).
+`tol` drops negligible generator amplitudes (raise accuracy by lowering it)."""
+function ladder_channels(geo::LadderGeometry, M::AbstractMatrix;
+                         λ::Float64=2 - sqrt(3), tol::Float64=1e-8)
+    chans = GeoChannel[]
+    x0 = (geo.N + 2) / 2
+
+    # horizontal massive (antisymmetric channel ½v_AA, row factor σ)
+    hcols = collect(1:geo.N); scols = collect(1:geo.N + 1)
+    after_h = [x ≥ xp for x in hcols, xp in scols]
+    KA = zeros(length(hcols), length(scols))
+    for (_, x, xp, v) in channel_pairs(geo, M, :A, :A)
+        KA[x, xp] = 0.5 * v
+    end
+    geometric_kernel_channels!(chans, KA, hcols, scols, after_h, :hlink,
+                               σrow, σrow, λ, x0; tol=tol)
+
+    # horizontal massless (affine ramp + step), valid at any N
+    a0, q, r, s, _ = symmetric_ramp_step(geo, M)
+    affine_step_channels!(chans, a0, q, r, s)
+
+    # vertical links (purely massive), per source row
+    vcols = collect(1:geo.N + 1)
+    for ys in 1:2
+        KV = [M[geo.link_id[(x, 1, 2)], geo.vertex_id[(xp, ys)]] for x in vcols, xp in vcols]
+        after_v = [geo.link_pos[(x, 1, 2)] > geo.site_pos[(xp, ys)] for x in vcols, xp in vcols]
+        srcfac = let ys = ys; (y) -> (y == ys ? 1.0 : 0.0); end
+        geometric_kernel_channels!(chans, KV, vcols, vcols, after_v, :vlink,
+                                   (y) -> 1.0, srcfac, λ, x0; tol=tol)
+    end
+    return chans
+end
+
+"""Reconstruct M̃[ℓ,s] for ALL links (horizontal AND vertical) from the MPO and
+compare to the exact shift field; returns (M̃, max_err)."""
+function reconstruct_all_M_from_mpo(W::Vector{Array{Float64,4}}, geo::LadderGeometry;
+                                    Q::AbstractMatrix=charge_operator(),
+                                    φ::AbstractMatrix=link_phase_operator(size(W[2], 3)))
+    M = shift_field(geo)
+    Mt = zeros(Float64, geo.n_links, geo.n_sites)
+    max_err = 0.0
+    for (ℓ, key) in enumerate(geo.link_def)
+        ℓpos = geo.link_pos[key]
+        for (s, (xp, ys)) in enumerate(geo.vertex_xy)
+            spos = geo.site_pos[(xp, ys)]
+            v = real(mpo_coefficient(W, geo, ℓpos, spos; Q=Q, φ=φ))
+            Mt[ℓ, s] = v
+            max_err = max(max_err, abs(v - M[ℓ, s]))
+        end
+    end
+    return Mt, max_err
 end
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
@@ -377,10 +503,45 @@ function validate_decoupling_mpo(N::Int; d::Int=3, K::Int=3, tol_fsa::Float64=1e
     return ok
 end
 
+"""
+    validate_full_mpo(N; d, tol, tol_kernel) → Bool
+
+Validate the FULL data-driven exponent MPO (horizontal + vertical links) built by
+`ladder_channels` directly from the exact shift field:
+  • FSA + kernel accuracy — the contracted MPO reproduces the EXACT M over ALL
+    links to `tol_kernel` (geometric generators capture the finite-size kernel;
+    raise accuracy by lowering `tol`);
+  • reports Dχ and a breakdown of horizontal vs vertical error.
+This supersedes `validate_decoupling_mpo` (which was horizontal-only, K=1)."""
+function validate_full_mpo(N::Int; d::Int=3, tol::Float64=1e-8, tol_kernel::Float64=1e-4)
+    geo = ladder_geometry(N)
+    M   = shift_field(geo)
+    chans = ladder_channels(geo, M; tol=tol)
+    Q = charge_operator(); φ = link_phase_operator(d)
+    W = build_exponent_mpo(geo, chans; d=d, Q=Q, φ=φ)
+    Dχ = size(W[1], 1)
+    Mt, err = reconstruct_all_M_from_mpo(W, geo; Q=Q, φ=φ)
+
+    # split error by link direction
+    errh = 0.0; errv = 0.0
+    for (ℓ, (x, y, i)) in enumerate(geo.link_def), s in 1:geo.n_sites
+        e = abs(Mt[ℓ, s] - M[ℓ, s])
+        i == 1 ? (errh = max(errh, e)) : (errv = max(errv, e))
+    end
+
+    println("─── full exponent MPO (N=$N, d=$d, gen-tol=$tol) ───")
+    @printf("  Dχ=%d (= 2 + %d channels)   MPO vs exact M: max_err=%.2e  (h=%.2e, v=%.2e)\n",
+            Dχ, length(chans), err, errh, errv)
+    ok = err < tol_kernel
+    println(ok ? "  PASS: full MPO (horizontal + vertical) reproduces M to tol_kernel=$tol_kernel" :
+                 "  WARN: kernel error exceeds tol_kernel (lower gen-tol for more generators)")
+    return ok
+end
+
 # Demo / self-test when run directly.
 if abspath(PROGRAM_FILE) == @__FILE__
     for N in (8, 12)
-        validate_decoupling_mpo(N; d=3)
+        validate_full_mpo(N; d=3)
         println()
     end
 end

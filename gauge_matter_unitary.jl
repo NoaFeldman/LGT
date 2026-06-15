@@ -191,6 +191,109 @@ function mpo_to_dense(W::MPO)
 end
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  MPS algebra (apply 𝒰 to a state — sidesteps materializing high-bond 𝒰)  ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+const MPS = Vector{Array{ComplexF64,3}}     # ψ[p][Dl,Dr,d], open boundaries
+
+"""Random bond-1 product-state MPS with the given local dimensions (normalized)."""
+function mps_random_product(dims::AbstractVector{Int})
+    ψ = MPS(undef, length(dims))
+    for (p, dp) in enumerate(dims)
+        v = randn(ComplexF64, dp); v ./= norm(v)
+        ψ[p] = reshape(v, 1, 1, dp)
+    end
+    return ψ
+end
+
+"""⟨φ|ψ⟩ by transfer contraction."""
+function mps_overlap(φ::MPS, ψ::MPS)
+    v = ones(ComplexF64, 1, 1)
+    for p in eachindex(φ)
+        d = size(φ[p], 3)
+        newv = zeros(ComplexF64, size(φ[p], 2), size(ψ[p], 2))
+        @inbounds for k in 1:d
+            newv .+= φ[p][:, :, k]' * v * ψ[p][:, :, k]
+        end
+        v = newv
+    end
+    return v[1, 1]
+end
+mps_norm(ψ::MPS) = sqrt(real(mps_overlap(ψ, ψ)))
+
+"""Apply an MPO to an MPS: (Wψ)[k] = Σ_b W[k,b] ψ[b]; bonds tensor-producted."""
+function mpo_apply_mps(W::MPO, ψ::MPS)
+    n = length(W); out = MPS(undef, n)
+    for p in 1:n
+        DlW, DrW, d, _ = size(W[p]); Dlψ, Drψ, _ = size(ψ[p])
+        T = zeros(ComplexF64, DlW * Dlψ, DrW * Drψ, d)
+        @inbounds for aL in 1:DlW, aR in 1:DrW, bL in 1:Dlψ, bR in 1:Drψ
+            T[(aL-1)*Dlψ+bL, (aR-1)*Drψ+bR, :] = W[p][aL, aR, :, :] * ψ[p][bL, bR, :]
+        end
+        out[p] = T
+    end
+    return out
+end
+
+"""Two-sweep SVD compression of an MPS (truncate S < ε·S₁ or beyond Dmax)."""
+function mps_compress!(ψ::MPS; ε::Float64=1e-10, Dmax::Int=typemax(Int))
+    n = length(ψ)
+    for p in 1:n-1
+        Dl, Dr, d = size(ψ[p])
+        F = svd(reshape(permutedims(ψ[p], (1, 3, 2)), Dl * d, Dr))
+        r = length(F.S)
+        ψ[p] = permutedims(reshape(F.U, Dl, d, r), (1, 3, 2))
+        SV = Diagonal(F.S) * F.Vt
+        Dl2, Dr2, _ = size(ψ[p+1])
+        ψ[p+1] = reshape(SV * reshape(ψ[p+1], Dr, Dr2 * d), r, Dr2, d)
+    end
+    for p in n:-1:2
+        Dl, Dr, d = size(ψ[p])
+        F = svd(reshape(permutedims(ψ[p], (1, 3, 2)), Dl, d * Dr))
+        s = F.S; keep = max(1, min(Dmax, count(>(ε * s[1]), s)))
+        ψ[p] = permutedims(reshape(F.Vt[1:keep, :], keep, d, Dr), (1, 3, 2))
+        US = F.U[:, 1:keep] * Diagonal(s[1:keep])
+        Dl0, _, _ = size(ψ[p-1])
+        ψ[p-1] = permutedims(reshape(reshape(permutedims(ψ[p-1], (1, 3, 2)), Dl0 * d, Dl) * US,
+                                     Dl0, d, keep), (1, 3, 2))
+    end
+    return ψ
+end
+
+"""Unitarity by random-state probing: ‖𝒰†𝒰|ψ⟩ − |ψ⟩‖/‖ψ‖ averaged over product
+states.  Cheaper than forming 𝒰†𝒰 (whose bond is (maxbond 𝒰)²): the worst is the
+intermediate MPS bond (maxbond 𝒰)², compressed on the fly.  Also reports the
+norm-preservation defect |‖𝒰ψ‖/‖ψ‖ − 1|."""
+function unitarity_error_vec(U::MPO; nsamples::Int=3, ε::Float64=1e-10,
+                             Dmax::Int=512)
+    Ud = mpo_dagger(U)
+    dims = [size(Up, 3) for Up in U]
+    worst_uni = 0.0; worst_norm = 0.0
+    for _ in 1:nsamples
+        ψ = mps_random_product(dims)
+        nψ = mps_norm(ψ)
+        φ1 = mpo_apply_mps(U, ψ);  mps_compress!(φ1; ε=ε, Dmax=Dmax)
+        φ2 = mpo_apply_mps(Ud, φ1); mps_compress!(φ2; ε=ε, Dmax=Dmax)
+        dev2 = real(mps_overlap(φ2, φ2)) - 2 * real(mps_overlap(ψ, φ2)) + real(mps_overlap(ψ, ψ))
+        worst_uni  = max(worst_uni, sqrt(max(0.0, dev2)) / nψ)
+        worst_norm = max(worst_norm, abs(mps_norm(φ1) / nψ - 1))
+    end
+    return worst_uni, worst_norm
+end
+
+"""⟨ψ|O at chain site p|ψ⟩ / ⟨ψ|ψ⟩ for a local operator O."""
+function mps_local_expect(ψ::MPS, p::Int, O::AbstractMatrix)
+    Oψ = copy(ψ)
+    d = size(ψ[p], 3)
+    T = zeros(ComplexF64, size(ψ[p])...)
+    @inbounds for k in 1:d, b in 1:d
+        T[:, :, k] .+= O[k, b] .* ψ[p][:, :, b]
+    end
+    Oψ[p] = T
+    return real(mps_overlap(ψ, Oψ)) / real(mps_overlap(ψ, ψ))
+end
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  Chebyshev (Jacobi–Anger) exponentiation                                 ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
@@ -305,42 +408,72 @@ end
 """Build 𝒰 = exp(−iÔ) for the (horizontal-only) ladder exponent and check
 unitarity.  Small N / cutoff d keep the bond growth tractable.
 
-The Stage-2 fit needs N≳12 to resolve the bulk, which is far too large to
-exponentiate; the model PARAMETERS are essentially N-independent (λ=2−√3,
-c≈−0.21, s=−1, q≈1/(N+1)), so for this machinery test we use a representative
-`HModel` directly.  The exact decomposition was validated in Stage 3 at N≥12.
+Uses the FULL data-driven exponent (horizontal + vertical links) built directly
+from the exact shift field via `ladder_channels` — valid at any N (no N≳12 fit),
+so small N keeps the bond growth tractable.
 
 exp(−iÔ) is a global product of long-range two-body gates, so 𝒰 is genuinely a
 HIGH-bond operator: a single compressed MPO is exact only as Dmax→∞.  We sweep
-the bond cap and report ‖𝒰†𝒰−𝕀‖ converging toward 0 — the operator analogue of
-the Stage-2 N-sweep."""
+the bond cap and report the random-state unitarity ‖𝒰†𝒰ψ−ψ‖/‖ψ‖ converging toward
+0 — the operator analogue of the Stage-2 N-sweep."""
 function validate_decoupling_unitary(N::Int; d::Int=2, ε::Float64=1e-9,
-                                     Dmaxes=(16, 24, 32, 40))
+                                     gen_tol::Float64=1e-3, Dmaxes=(16, 24, 32, 40))
     geo = ladder_geometry(N)
-    m   = HModel(-0.21, 2 - sqrt(3), 0.0, 1 / (N + 1), 0.0, -1.0)   # representative
-    x0  = (geo.N + 2) / 2
-    chans = horizontal_channels(m, x0)
+    M = shift_field(geo)
+    chans = ladder_channels(geo, M; tol=gen_tol)          # full h+v exponent
     Q = charge_operator(); φ = link_phase_operator(d)
     Wreal = build_exponent_mpo(geo, chans; d=d, Q=Q, φ=φ)
     Dχ = size(Wreal[1], 1)
     L, R = mpo_boundaries(Dχ)
     O = to_open_mpo(Wreal, L, R)
-    a  = ladder_spectral_bound(analytic_M(geo, m), φ, Q)
+    a = ladder_spectral_bound(M, φ, Q)
 
     println("─── decoupling unitary 𝒰=exp(−iÔ) (N=$N, d=$d, Dχ=$Dχ, a=$(round(a;digits=3))) ───")
     residuals = Float64[]
     for Dmax in Dmaxes
         U = expmi_mpo(O, a; ε=ε, Dmax=Dmax)
-        uni = unitarity_error(U)
+        uni, ndef = unitarity_error_vec(U)
         push!(residuals, uni)
-        @printf("  Dmax=%-3d  𝒰 max bond=%-3d   ‖𝒰†𝒰−𝕀‖_F/‖𝕀‖_F = %.2e\n",
-                Dmax, mpo_maxbond(U), uni)
+        @printf("  Dmax=%-3d  𝒰 max bond=%-3d   ‖𝒰†𝒰ψ−ψ‖/‖ψ‖=%.2e   |‖𝒰ψ‖/‖ψ‖−1|=%.2e\n",
+                Dmax, mpo_maxbond(U), uni, ndef)
     end
     converging = length(residuals) < 2 || issorted(residuals; rev=true)  # monotone ↓
     ok = residuals[end] < 1e-3 || converging
     println(residuals[end] < 1e-3 ? "  PASS: 𝒰 unitary to <1e-3 at the largest bond cap" :
             converging            ? "  PASS: unitarity residual converging with Dmax (𝒰 is a high-bond operator)" :
                                     "  WARN: residual not converging — check exponent / coefficients")
+    return ok
+end
+
+"""Decoupling action demo: 𝒰 commutes with every matter charge ([Q_s,Ô]=0), so it
+conserves the total matter charge while shifting the gauge-link observables — the
+defining behaviour of the gauge–matter decoupling.  Apply 𝒰 to a random product
+state and check ⟨Q_tot⟩ is invariant while ⟨φ_ℓ⟩ moves."""
+function decoupling_demo(N::Int; d::Int=2, gen_tol::Float64=1e-3, Dmax::Int=32)
+    geo = ladder_geometry(N); M = shift_field(geo)
+    chans = ladder_channels(geo, M; tol=gen_tol)
+    Q = charge_operator(); φ = link_phase_operator(d)
+    Dχ = 2 + length(chans)
+    O = to_open_mpo(build_exponent_mpo(geo, chans; d=d, Q=Q, φ=φ), mpo_boundaries(Dχ)...)
+    a = ladder_spectral_bound(M, φ, Q)
+    U = expmi_mpo(O, a; ε=1e-9, Dmax=Dmax)
+
+    ψ  = mps_random_product([size(Up, 3) for Up in U])
+    Uψ = mpo_apply_mps(U, ψ); mps_compress!(Uψ; Dmax=Dmax)
+
+    vsites = [geo.site_pos[xy] for xy in geo.vertex_xy]
+    Qtot0 = sum(mps_local_expect(ψ,  p, Q) for p in vsites)
+    Qtot1 = sum(mps_local_expect(Uψ, p, Q) for p in vsites)
+    lpos = geo.link_pos[geo.link_def[1]]
+    φ0 = mps_local_expect(ψ, lpos, φ); φ1 = mps_local_expect(Uψ, lpos, φ)
+
+    println("─── decoupling action demo (N=$N, d=$d) ───")
+    @printf("  ⟨Q_tot⟩: before=%+.5f  after=%+.5f   Δ=%.2e  (should be ~0: charge conserved)\n",
+            Qtot0, Qtot1, abs(Qtot1 - Qtot0))
+    @printf("  ⟨φ_ℓ⟩ (link 1): before=%+.5f  after=%+.5f   (𝒰 shifts the gauge field)\n", φ0, φ1)
+    ok = abs(Qtot1 - Qtot0) < 1e-6
+    println(ok ? "  PASS: 𝒰 conserves matter charge (acts only on the gauge links)" :
+                 "  WARN: matter charge not conserved — unexpected")
     return ok
 end
 
@@ -353,5 +486,7 @@ if abspath(PROGRAM_FILE) == @__FILE__
     validate_decoupling_unitary(2; d=2, Dmaxes=(8, 16, 24, 32))
     println()
     validate_decoupling_unitary(4; d=2, Dmaxes=(16, 24, 32, 40))
+    println()
+    decoupling_demo(3; d=2)
     println()
 end
