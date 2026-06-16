@@ -228,6 +228,34 @@ function mpo_apply_mps(W::CMPO, ψ::CMPS)
     return out
 end
 
+"""
+    mpo_apply_mps_zipup(W, ψ; Dmax, ε) → MPS ≈ W·ψ, bond ≤ Dmax
+
+Memory-safe MPO·MPS: a single left-to-right sweep that contracts each site and
+SVD-truncates immediately, so the new bond never exceeds `Dmax` and the full
+`(H_bond × ψ_bond)` product tensor is never materialised across the whole chain
+(only one site's worth at a time).  Essential for time evolution on the 3×4
+lattice, where the naive apply's transient is hundreds of GB."""
+function mpo_apply_mps_zipup(W::CMPO, ψ::CMPS; Dmax::Int=120, ε::Float64=1e-10)
+    n = length(W)
+    out = CMPS(undef, n)
+    L = ones(ComplexF64, 1, 1, 1)             # (dl_new, aH, aψ)
+    for p in 1:n
+        d = size(W[p], 3)
+        @tensor B[dl, bH, bps, k] := L[dl, aH, aps] * W[p][aH, bH, k, q] * ψ[p][aps, bps, q]
+        dl = size(B, 1); bH = size(B, 2); bps = size(B, 3)
+        M = reshape(permutedims(B, (1, 4, 2, 3)), dl * d, bH * bps)
+        if p < n
+            F = svd(M); s = F.S; keep = max(1, min(Dmax, count(>(ε * s[1]), s)))
+            out[p] = permutedims(reshape(F.U[:, 1:keep], dl, d, keep), (1, 3, 2))
+            L = reshape(Diagonal(s[1:keep]) * F.Vt[1:keep, :], keep, bH, bps)
+        else
+            out[p] = permutedims(reshape(M, dl, d, bH * bps), (1, 3, 2))  # right bond = 1
+        end
+    end
+    return out
+end
+
 function mps_axpby(α::Number, A::CMPS, β::Number, B::CMPS)
     n = length(A); C = CMPS(undef, n)
     for p in 1:n
@@ -275,8 +303,15 @@ function mps_compress!(ψ::CMPS; ε::Float64=1e-10, Dmax::Int=200)
     return ψ
 end
 
-"""⟨ψ|H|ψ⟩ for an MPO H (assumes ⟨ψ|ψ⟩ handled by caller)."""
-mpo_expect(H::CMPO, ψ::CMPS) = mps_overlap(ψ, mpo_apply_mps(H, ψ))
+"""⟨ψ|H|ψ⟩ for an MPO H by sweeping the ⟨ψ|H|ψ⟩ sandwich (memory ~D²·H_bond;
+never forms the H·ψ MPS).  Caller divides by ⟨ψ|ψ⟩ for the expectation."""
+function mpo_expect(H::CMPO, ψ::CMPS)
+    E = ones(ComplexF64, 1, 1, 1)              # (bra, mpo, ket) trivial left boundary
+    for p in eachindex(H)
+        E = left_env(E, H[p], ψ[p])            # absorb site p into the sandwich
+    end
+    return E[1, 1, 1]
+end
 
 """⟨ψ|O at chain site p|ψ⟩ / ⟨ψ|ψ⟩ for a local operator O."""
 function mps_local_expect(ψ::CMPS, p::Int, O::AbstractMatrix)
@@ -494,14 +529,14 @@ function krylov_evolve_step(H::CMPO, ψ::CMPS, dt::Float64; m::Int=8,
     V = CMPS[]
     v1 = deepcopy(ψ); nv = mps_norm(v1); v1[1] ./= nv; push!(V, v1)
     α = Float64[]; β = Float64[]
-    w = mpo_apply_mps(H, V[1]); mps_compress!(w; Dmax=Dmax, ε=ε)
+    w = mpo_apply_mps_zipup(H, V[1]; Dmax=Dmax, ε=ε)
     a1 = real(mps_overlap(V[1], w)); push!(α, a1)
     w = mps_axpby(1.0, w, -a1, V[1]); mps_compress!(w; Dmax=Dmax, ε=ε)
     for j in 2:m
         b = mps_norm(w); b < 1e-12 && break
         push!(β, b)
         vj = deepcopy(w); vj[1] ./= b; push!(V, vj)
-        w = mpo_apply_mps(H, vj); mps_compress!(w; Dmax=Dmax, ε=ε)
+        w = mpo_apply_mps_zipup(H, vj; Dmax=Dmax, ε=ε)
         aj = real(mps_overlap(vj, w)); push!(α, aj)
         w = mps_axpby(1.0, w, -aj, vj)
         w = mps_axpby(1.0, w, -b, V[j-1]); mps_compress!(w; Dmax=Dmax, ε=ε)
