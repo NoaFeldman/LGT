@@ -34,9 +34,9 @@ const Q_DT     = 0.05
 const Q_NSTEPS = 40        # t_final = 2.0
 const Q_DMAX   = 120       # evolution bond cap
 const Q_KRYLOV = 8
-const Q_DGS    = 80        # DMRG bond (B,C initial state)
-const Q_NSW    = 10
-const Q_LAM    = 30.0
+const Q_DGS    = 40        # DMRG bond (B,C initial state)
+const Q_NSW    = 8
+const Q_LAM    = 5.0
 
 # ── MPS real-time loop ───────────────────────────────────────────────────────
 function evolve_mps(ψ0::CMPS, H::CMPO; dt::Float64, n_steps::Int, Dmax::Int)
@@ -91,7 +91,8 @@ function run_quench_B_mps(results_dir; m_init=5.0, m_final=0.1)
     dims = node_dims(Q_NX, Q_NY, Q_DG)
     println("  preparing GS at m=$m_init (penalized DMRG) ...")
     Hpen = build_penalized_H(Q_NX, Q_NY, Q_DG; g=g, t=Q_THOP, m=m_init, gauss_g=gch, Λ=Q_LAM)
-    _, ψ0 = dmrg_ground_state(Hpen, dims; D=Q_DGS, nsweeps=Q_NSW, verbose=true)
+    _, ψ0 = dmrg_ground_state(Hpen, dims; D=Q_DGS, nsweeps=Q_NSW, verbose=true,
+                              ψ0=staggered_mps(Q_NX, Q_NY, Q_DG))
     H = build_H_mpo(Q_NX, Q_NY, Q_DG; g=g, t=Q_THOP, m=m_final)
     data = evolve_mps(ψ0, H; dt=Q_DT, n_steps=Q_NSTEPS, Dmax=Q_DMAX)
     write_mps_csv(data, "mps_quench_B", results_dir)
@@ -105,7 +106,8 @@ function run_quench_C_mps(results_dir; g_init=2.0, g_final=0.5)
     dims = node_dims(Q_NX, Q_NY, Q_DG)
     println("  preparing GS at g=$g_init (penalized DMRG) ...")
     Hpen = build_penalized_H(Q_NX, Q_NY, Q_DG; g=g_init, t=Q_THOP, m=m, gauss_g=gch, Λ=Q_LAM)
-    _, ψ0 = dmrg_ground_state(Hpen, dims; D=Q_DGS, nsweeps=Q_NSW, verbose=true)
+    _, ψ0 = dmrg_ground_state(Hpen, dims; D=Q_DGS, nsweeps=Q_NSW, verbose=true,
+                              ψ0=staggered_mps(Q_NX, Q_NY, Q_DG))
     H = build_H_mpo(Q_NX, Q_NY, Q_DG; g=g_final, t=Q_THOP, m=m)
     data = evolve_mps(ψ0, H; dt=Q_DT, n_steps=Q_NSTEPS, Dmax=Q_DMAX)
     write_mps_csv(data, "mps_quench_C", results_dir)

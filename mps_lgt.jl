@@ -383,12 +383,13 @@ KrylovKit, SVD-split with truncation to `D`, and advance the swept-through
 environment.  Mutates `ψ` and (`L` if to_right, else `R`).  Returns the energy."""
 function two_site_update!(ψ::CMPS, H::CMPO,
                           L::Vector{Array{ComplexF64,3}}, R::Vector{Array{ComplexF64,3}},
-                          p::Int, D::Int; to_right::Bool)
+                          p::Int, D::Int; to_right::Bool,
+                          tol::Float64=1e-8, maxiter::Int=40, krylovdim::Int=12)
     a, mmid, k1 = size(ψ[p]); _, c, k2 = size(ψ[p+1])
     @tensor Θ[ai, ki, kj, ci] := ψ[p][ai, mi, ki] * ψ[p+1][mi, ci, kj]
     Heff = θ -> apply_Heff2(L[p], H[p], H[p+1], R[p+1], θ)
     vals, vecs, info = eigsolve(Heff, Θ, 1, :SR; ishermitian=true,
-                                krylovdim=min(20, length(Θ)), tol=1e-10, maxiter=200)
+                                krylovdim=min(krylovdim, length(Θ)), tol=tol, maxiter=maxiter)
     E = real(vals[1]); Θg = vecs[1]
     Θg ./= norm(Θg)
     M = reshape(Θg, a * k1, k2 * c)
@@ -407,33 +408,51 @@ function two_site_update!(ψ::CMPS, H::CMPO,
 end
 
 """
-    dmrg_ground_state(H, dims; D, nsweeps, seed) → (E, ψ)
+    dmrg_ground_state(H, dims; D, nsweeps, ψ0, tol, maxiter, etol) → (E, ψ)
 
-Two-site DMRG.  Bond dimension grows up to `D`; `nsweeps` left-right sweeps."""
-function dmrg_ground_state(H::CMPO, dims::Vector{Int}; D::Int=40, nsweeps::Int=6,
-                           seed::Int=1, verbose::Bool=true)
+Two-site DMRG.  Bond grows up to `D`; up to `nsweeps` sweeps with early stop when
+the per-sweep energy change drops below `etol`.  Pass `ψ0` (e.g. the in-sector
+product state) to start from a physically sensible state — far cheaper than a
+random start, which begins in the wrong gauge sectors and forces the penalty to
+do heavy lifting.  `tol`/`maxiter`/`krylovdim` control the local eigensolver."""
+function dmrg_ground_state(H::CMPO, dims::Vector{Int}; D::Int=40, nsweeps::Int=8,
+                           seed::Int=1, verbose::Bool=true,
+                           ψ0::Union{Nothing,CMPS}=nothing,
+                           tol::Float64=1e-8, maxiter::Int=40, krylovdim::Int=12,
+                           etol::Float64=1e-7)
     n = length(dims)
-    Random.seed!(seed)
-    ψ = CMPS(undef, n); Dprev = 1
-    for p in 1:n
-        Dr = p == n ? 1 : min(D, Dprev * dims[p])
-        ψ[p] = randn(ComplexF64, Dprev, Dr, dims[p]); Dprev = Dr
+    if ψ0 === nothing
+        Random.seed!(seed)
+        ψ = CMPS(undef, n); Dprev = 1
+        for p in 1:n
+            Dr = p == n ? 1 : min(D, Dprev * dims[p])
+            ψ[p] = randn(ComplexF64, Dprev, Dr, dims[p]); Dprev = Dr
+        end
+    else
+        ψ = deepcopy(ψ0)
     end
     mps_compress!(ψ; Dmax=D); nrm = mps_norm(ψ); ψ[1] ./= nrm
 
-    E = 0.0
+    E = 0.0; Eprev = Inf
+    upd(ψ, L, R, p, tr) = two_site_update!(ψ, H, L, R, p, D; to_right=tr,
+                                           tol=tol, maxiter=maxiter, krylovdim=krylovdim)
     for sweep in 1:nsweeps
         R = build_R(H, ψ)
         L = Vector{Array{ComplexF64,3}}(undef, n); L[1] = ones(ComplexF64, 1, 1, 1)
         for p in 1:n-1
-            E = two_site_update!(ψ, H, L, R, p, D; to_right=true)
+            E = upd(ψ, L, R, p, true)
         end
         L2 = build_L(H, ψ)
         R2 = Vector{Array{ComplexF64,3}}(undef, n); R2[n] = ones(ComplexF64, 1, 1, 1)
         for p in n-1:-1:1
-            E = two_site_update!(ψ, H, L2, R2, p, D; to_right=false)
+            E = upd(ψ, L2, R2, p, false)
         end
-        verbose && @printf("    DMRG sweep %d:  E = %.10f\n", sweep, E)
+        verbose && @printf("    DMRG sweep %d:  E = %.10f  (ΔE = %.2e)\n", sweep, E, abs(E - Eprev))
+        if abs(E - Eprev) < etol
+            verbose && println("    converged.")
+            break
+        end
+        Eprev = E
     end
     return E, ψ
 end

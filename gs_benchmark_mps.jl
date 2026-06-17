@@ -34,9 +34,9 @@ const B_NX    = 3
 const B_NY    = 4
 const B_DG    = 1
 const B_THOP  = 1.0
-const B_DMPS  = 80       # DMRG bond dimension
-const B_NSW   = 10       # DMRG sweeps
-const B_LAM   = 30.0     # Gauss-law penalty strength
+const B_DMPS  = 40       # DMRG bond dimension (gauge sector is small)
+const B_NSW   = 8        # max DMRG sweeps (early-stops on convergence)
+const B_LAM   = 5.0      # Gauss-law penalty (modest: pins sector w/o inflating spectrum)
 
 function run_one_mps(task_id::Int)
     idx  = ((task_id - 1) % length(MPS_GRID)) + 1
@@ -62,7 +62,8 @@ function run_one_mps(task_id::Int)
     dims = node_dims(nx, ny, dg)
     Hpen = build_penalized_H(nx, ny, dg; g=g, t=B_THOP, m=m, gauss_g=gch, Λ=B_LAM)
     t1 = time()
-    _, ψ = dmrg_ground_state(Hpen, dims; D=B_DMPS, nsweeps=B_NSW, verbose=true)
+    _, ψ = dmrg_ground_state(Hpen, dims; D=B_DMPS, nsweeps=B_NSW, verbose=true,
+                             ψ0=staggered_mps(nx, ny, dg))   # start in the target sector
     Hbare = _assemble_mpo(dims, lgt_terms(nx, ny, dg; g=g, t=B_THOP, m=m))
     Emps  = real(mpo_expect(Hbare, ψ)) / real(mps_overlap(ψ, ψ))
     obs_mps = measure_mps(ψ, nx, ny, dg)
