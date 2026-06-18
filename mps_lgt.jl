@@ -418,7 +418,7 @@ do heavy lifting.  `tol`/`maxiter`/`krylovdim` control the local eigensolver."""
 function dmrg_ground_state(H::CMPO, dims::Vector{Int}; D::Int=40, nsweeps::Int=8,
                            seed::Int=1, verbose::Bool=true,
                            ψ0::Union{Nothing,CMPS}=nothing,
-                           tol::Float64=1e-8, maxiter::Int=40, krylovdim::Int=12,
+                           tol::Float64=1e-7, maxiter::Int=60, krylovdim::Int=12,
                            etol::Float64=1e-7)
     n = length(dims)
     if ψ0 === nothing
