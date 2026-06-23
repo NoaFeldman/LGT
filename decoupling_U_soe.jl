@@ -36,13 +36,25 @@ include(joinpath(@__DIR__, "lgt_greens_soe.jl"))
 
 using LinearAlgebra
 using Printf
-using QuadGK
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  Chebyshev MPO exponential (Jacobi–Anger), CMPO types                     ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
-besselJ(k::Int, a::Real) = quadgk(τ -> cos(k * τ - a * sin(τ)), 0, π; rtol=1e-12)[1] / π
+"""All Bessel functions J_0(a),…,J_N(a) by Miller's stable downward recurrence
+(robust for any a, unlike an oscillatory quadrature)."""
+function besselJ_all(N::Int, a::Real)
+    a == 0 && return Float64[k == 0 ? 1.0 : 0.0 for k in 0:N]
+    Mtop = N + 25 + ceil(Int, abs(a))
+    b = zeros(Float64, Mtop + 2)               # b[k+1] = J_k
+    b[Mtop+1] = 1e-30
+    for k in Mtop:-1:1
+        b[k] = (2k / a) * b[k+1] - b[k+2]      # J_{k-1} = (2k/a)J_k − J_{k+1}
+    end
+    nrm = b[1] + 2 * sum(b[2k+1] for k in 1:(Mtop ÷ 2))   # J_0 + 2Σ J_{2k} = 1
+    b ./= nrm
+    return b[1:N+1]
+end
 mpo_identity_c(dims) = CMPO([reshape(ComplexF64.(Matrix(I, d, d)), 1, 1, d, d) for d in dims])
 mpo_scale_c(α, A::CMPO) = CMPO([p == 1 ? α .* A[1] : A[p] for p in eachindex(A)])
 
@@ -59,21 +71,23 @@ function mpo_mult_c(A::CMPO, B::CMPO)
     return C
 end
 
-"""exp(−i O) as a CMPO via Jacobi–Anger; `a` ≥ spectral radius of O."""
-function expmi_mpo(O::CMPO, a::Float64; ε::Float64=1e-9, Dmax::Int=32, Kmax::Int=400)
-    a < 1e-12 && return mpo_identity_c([size(Op, 3) for Op in O])   # O ≈ 0 ⇒ 𝒰 = I
+"""exp(−i O) as a CMPO via Jacobi–Anger; `a` ≥ spectral radius of O.  Bessel
+weights are precomputed by the stable recurrence and the term count adapts to a."""
+function expmi_mpo(O::CMPO, a::Float64; ε::Float64=1e-9, Dmax::Int=32)
     dims = [size(Op, 3) for Op in O]
+    (a < 1e-12 || !isfinite(a)) && return mpo_identity_c(dims)      # O ≈ 0 ⇒ 𝒰 = I
+    Kmax = min(2000, ceil(Int, 1.5 * a) + 60)                      # enough terms for this a
+    J = besselJ_all(Kmax, a)                                       # J[k+1] = J_k(a)
     Hs = mpo_scale_c(1 / a, O); mpo_compress!(Hs; ε=ε, Dmax=Dmax)
     Tprev = mpo_identity_c(dims); Tcur = Hs
-    U = mpo_axpby(besselJ(0, a), Tprev, 2 * (-im) * besselJ(1, a), Tcur)
+    U = mpo_axpby(J[1], Tprev, 2 * (-im) * J[2], Tcur)
     mpo_compress!(U; ε=ε, Dmax=Dmax)
     for k in 2:Kmax
         HT = mpo_mult_c(Hs, Tcur); mpo_compress!(HT; ε=ε, Dmax=Dmax)
         Tnext = mpo_axpby(2.0, HT, -1.0, Tprev); mpo_compress!(Tnext; ε=ε, Dmax=Dmax)
-        ck = 2 * (-im)^k * besselJ(k, a)
-        U = mpo_axpby(1.0, U, ck, Tnext); mpo_compress!(U; ε=ε, Dmax=Dmax)
+        U = mpo_axpby(1.0, U, 2 * (-im)^k * J[k+1], Tnext); mpo_compress!(U; ε=ε, Dmax=Dmax)
         Tprev, Tcur = Tcur, Tnext
-        (k > a && abs(besselJ(k, a)) < ε) && break
+        (k > a && abs(J[k+1]) < ε) && break
     end
     return U
 end
@@ -185,37 +199,54 @@ Returns the decoupling unitary as a LIST of CMPO factors
 single screened-string unitary (low bond); `𝒰_bdry` folds the exact field back
 in within `bw` sites of the boundary."""
 function build_decoupling_U_soe(nx::Int, ny::Int; dg::Int=1, K::Int=10, bw::Int=1,
-                                Dmax::Int=32, Nx_ref::Int=8, Ny_ref::Int=8)
+                                Dmax::Int=32, Nx_ref::Int=8, Ny_ref::Int=8,
+                                a_max::Float64=50.0)
     @assert dg == 1
     _, pos = column_snake(nx, ny)
     dims = col_node_dims(nx, ny, dg)
     # fit the SoE on a LARGER reference lattice so K isn't capped by the target's
     # few distance bins; the (w_j,γ_j) define the bulk kernel for any lattice.
-    soe = soe_approximation(nx, ny; K=K, refine=true,
-                            Nx_ref=max(nx, Nx_ref), Ny_ref=max(ny, Ny_ref))
+    soe_full = soe_approximation(nx, ny; K=K, refine=true,
+                                 Nx_ref=max(nx, Nx_ref), Ny_ref=max(ny, Ny_ref))
     _, Gt = generate_greens_function(nx, ny)
 
-    factors = CMPO[]; bonds = Int[]
-    for j in 1:soe.K
+    # Build each screened-string factor, but SKIP channels whose spectral bound
+    # exceeds a_max — an ill-conditioned fit can give large cancelling amplitudes
+    # w_j, so an individual channel is a huge operator (slow/inaccurate to
+    # exponentiate) even when the SUM is benign.  The used set is reused for the
+    # boundary correction so M_SoE stays consistent.
+    factors = CMPO[]; bonds = Int[]; used = Int[]
+    for j in 1:soe_full.K
         Oj, Mabs = build_O(nx, ny, dg, pos, dims,
-                           (ix, iy, dir, jx, jy) -> shift_soe_j(soe, j, ix, iy, dir, jx, jy))
-        Uj = expmi_mpo(Oj, _spectral_bound(Mabs); Dmax=Dmax)
-        push!(factors, Uj); push!(bonds, maximum(size(W, 2) for W in Uj))
+                           (ix, iy, dir, jx, jy) -> shift_soe_j(soe_full, j, ix, iy, dir, jx, jy))
+        aj = _spectral_bound(Mabs)
+        if !isfinite(aj) || aj > a_max
+            @printf("  skip channel j=%d (γ=%.3f, a=%.1f > %.1f)\n", j, soe_full.γ[j], aj, a_max)
+            continue
+        end
+        push!(factors, expmi_mpo(Oj, aj; Dmax=Dmax))
+        push!(bonds, maximum(size(W, 2) for W in factors[end])); push!(used, j)
     end
+    @assert !isempty(used) "no usable SoE channels (all a > a_max=$a_max); raise a_max or lower K."
+    @printf("  SoE: used %d/%d channels;  γ = %s\n",
+            length(used), soe_full.K, string(round.(soe_full.γ[used]; digits=3)))
 
-    # boundary correction: (M_exact − M_SoE) on edge links/charges
+    shift_soe_used(ix, iy, dir, jx, jy) =
+        sum(shift_soe_j(soe_full, j, ix, iy, dir, jx, jy) for j in used)
+
+    # boundary correction: (M_exact − M_SoE) on edge links/charges (used channels)
     function Mbdry(ix, iy, dir, jx, jy)
         bx, by = dir == :R ? (ix + 1, iy) : (ix, iy + 1)
         (near_boundary(nx, ny, ix, iy, bw) || near_boundary(nx, ny, bx, by, bw) ||
          near_boundary(nx, ny, jx, jy, bw)) || return 0.0
-        return shift_exact(Gt, ix, iy, dir, jx, jy) - shift_soe_total(soe, ix, iy, dir, jx, jy)
+        return shift_exact(Gt, ix, iy, dir, jx, jy) - shift_soe_used(ix, iy, dir, jx, jy)
     end
     Obd, Mabs_bd = build_O(nx, ny, dg, pos, dims, Mbdry)
     Ubd = expmi_mpo(Obd, _spectral_bound(Mabs_bd); Dmax=Dmax)
     push!(factors, Ubd); push!(bonds, maximum(size(W, 2) for W in Ubd))
 
-    info = (K=soe.K, bonds=bonds, bdry_bond=bonds[end])
-    return factors, soe, info
+    info = (K=length(used), bonds=bonds, bdry_bond=bonds[end], n_string=length(used))
+    return factors, soe_full, info
 end
 
 """Apply 𝒰 = Π factors to an MPS (sequential, zip-up compressed).  Factors
@@ -267,8 +298,8 @@ function validate_U_soe(; nx::Int=2, ny::Int=2, Ks=(2, 4, 6), bw::Int=1)
             Ud = mpo_to_dense(U)
             uni = opnorm(Ud' * Ud - I)
             err = opnorm(Ud - Uex_d)
-            @printf("  K=%-2d %-8s: ‖𝒰−𝒰_exact‖=%.2e  ‖𝒰†𝒰−I‖=%.2e  max string bond=%d\n",
-                    soe.K, tag, err, uni, maximum(info.bonds[1:soe.K]))
+            @printf("  K=%-2d %-8s: used=%d  ‖𝒰−𝒰_exact‖=%.2e  ‖𝒰†𝒰−I‖=%.2e  max string bond=%d\n",
+                    K, tag, info.n_string, err, uni, maximum(info.bonds[1:info.n_string]))
         end
     end
     println("  (string bonds are O(1) ≪ exact bond; +bdry should lower the error)")
@@ -279,6 +310,6 @@ if abspath(PROGRAM_FILE) == @__FILE__
     println()
     # Larger lattice: build only (no dense), report efficiency
     factors, soe, info = build_decoupling_U_soe(3, 4; K=10, bw=1)
-    @printf("3×4 SoE decoupler: %d factors, string bonds=%s, bdry bond=%d\n",
-            length(factors), string(info.bonds[1:soe.K]), info.bdry_bond)
+    @printf("3×4 SoE decoupler: %d factors (%d strings + bdry), string bonds=%s, bdry bond=%d\n",
+            length(factors), info.n_string, string(info.bonds[1:info.n_string]), info.bdry_bond)
 end
