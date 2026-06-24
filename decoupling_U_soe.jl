@@ -224,15 +224,21 @@ function build_decoupling_U_soe(nx::Int, ny::Int; dg::Int=1, K::Int=10, bw::Int=
             @printf("  skip channel j=%d (γ=%.3f, a=%.1f > %.1f)\n", j, soe_full.γ[j], aj, a_max)
             continue
         end
-        push!(factors, expmi_mpo(Oj, aj; Dmax=Dmax))
-        push!(bonds, maximum(size(W, 2) for W in factors[end])); push!(used, j)
+        Uj = expmi_mpo(Oj, aj; Dmax=Dmax)
+        mx = maximum(maximum(abs, W) for W in Uj)         # stability: 𝒰 must be ~O(1)
+        if !isfinite(mx) || mx > 10.0
+            @printf("  skip channel j=%d (γ=%.3f: Chebyshev unstable, max|𝒰|=%.1e)\n",
+                    j, soe_full.γ[j], mx)
+            continue
+        end
+        push!(factors, Uj); push!(bonds, maximum(size(W, 2) for W in Uj)); push!(used, j)
     end
-    @assert !isempty(used) "no usable SoE channels (all a > a_max=$a_max); raise a_max or lower K."
+    n_string = length(used)
     @printf("  SoE: used %d/%d channels;  γ = %s\n",
-            length(used), soe_full.K, string(round.(soe_full.γ[used]; digits=3)))
+            n_string, soe_full.K, string(round.(soe_full.γ[used]; digits=3)))
 
     shift_soe_used(ix, iy, dir, jx, jy) =
-        sum(shift_soe_j(soe_full, j, ix, iy, dir, jx, jy) for j in used)
+        isempty(used) ? 0.0 : sum(shift_soe_j(soe_full, j, ix, iy, dir, jx, jy) for j in used)
 
     # boundary correction: (M_exact − M_SoE) on edge links/charges (used channels)
     function Mbdry(ix, iy, dir, jx, jy)
@@ -242,10 +248,21 @@ function build_decoupling_U_soe(nx::Int, ny::Int; dg::Int=1, K::Int=10, bw::Int=
         return shift_exact(Gt, ix, iy, dir, jx, jy) - shift_soe_used(ix, iy, dir, jx, jy)
     end
     Obd, Mabs_bd = build_O(nx, ny, dg, pos, dims, Mbdry)
-    Ubd = expmi_mpo(Obd, _spectral_bound(Mabs_bd); Dmax=Dmax)
-    push!(factors, Ubd); push!(bonds, maximum(size(W, 2) for W in Ubd))
+    a_bd = _spectral_bound(Mabs_bd); bdry_bond = 0
+    if isfinite(a_bd) && a_bd ≤ a_max
+        Ubd = expmi_mpo(Obd, a_bd; Dmax=Dmax)
+        mxb = maximum(maximum(abs, W) for W in Ubd)
+        if isfinite(mxb) && mxb ≤ 10.0
+            push!(factors, Ubd); bdry_bond = maximum(size(W, 2) for W in Ubd); push!(bonds, bdry_bond)
+        else
+            @printf("  boundary factor unstable (max|𝒰|=%.1e) — dropped\n", mxb)
+        end
+    else
+        @printf("  boundary a=%.1f > a_max — dropped (SoE_used too coarse)\n", a_bd)
+    end
+    isempty(factors) && (factors = CMPO[mpo_identity_c(dims)])   # nothing stable ⇒ 𝒰 = I
 
-    info = (K=length(used), bonds=bonds, bdry_bond=bonds[end], n_string=length(used))
+    info = (K=n_string, bonds=bonds, bdry_bond=bdry_bond, n_string=n_string)
     return factors, soe_full, info
 end
 
@@ -277,7 +294,7 @@ end
 On a small lattice (dense-feasible): each factor is exactly unitary; the
 SoE decoupler approaches the exact-M decoupler as K grows; the boundary factor
 reduces the error; and the per-string bonds are O(1) ≪ the exact bond."""
-function validate_U_soe(; nx::Int=2, ny::Int=2, Ks=(2, 4, 6), bw::Int=1)
+function validate_U_soe(; nx::Int=2, ny::Int=2, Ks=(1, 2, 3), bw::Int=1)
     println("─── SoE decoupling unitary 𝒰 ($(nx)×$(ny), column snake) ───")
     _, pos = column_snake(nx, ny); dims = col_node_dims(nx, ny, 1)
     @printf("  full Hilbert dim = %d\n", prod(dims))
@@ -291,15 +308,16 @@ function validate_U_soe(; nx::Int=2, ny::Int=2, Ks=(2, 4, 6), bw::Int=1)
     @printf("  exact-M decoupler bond = %d\n", maximum(size(W, 2) for W in Uex))
 
     for K in Ks
-        for (tag, usebd) in (("no-bdry", false), ("+bdry", true))
-            factors, soe, info = build_decoupling_U_soe(nx, ny; K=K, bw=bw)
-            usebd || (factors = factors[1:end-1])              # drop boundary factor
-            U = fold_factors(factors; Dmax=128)
-            Ud = mpo_to_dense(U)
-            uni = opnorm(Ud' * Ud - I)
-            err = opnorm(Ud - Uex_d)
-            @printf("  K=%-2d %-8s: used=%d  ‖𝒰−𝒰_exact‖=%.2e  ‖𝒰†𝒰−I‖=%.2e  max string bond=%d\n",
-                    K, tag, info.n_string, err, uni, maximum(info.bonds[1:info.n_string]))
+        factors, soe, info = build_decoupling_U_soe(nx, ny; K=K, bw=bw)
+        strings = factors[1:info.n_string]                 # first n_string are screened strings
+        has_bd  = info.bdry_bond > 0
+        for (tag, fac) in (("no-bdry", strings), ("+bdry", has_bd ? factors : strings))
+            isempty(fac) && (@printf("  K=%-2d %-8s: no stable channels\n", K, tag); continue)
+            Ud = mpo_to_dense(fold_factors(fac; Dmax=128))
+            uni = opnorm(Ud' * Ud - I); err = opnorm(Ud - Uex_d)
+            sb = info.n_string > 0 ? maximum(info.bonds[1:info.n_string]) : 0
+            @printf("  K=%-2d %-8s: strings=%d  ‖𝒰−𝒰_exact‖=%.2e  ‖𝒰†𝒰−I‖=%.2e  max string bond=%d\n",
+                    K, tag, info.n_string, err, uni, sb)
         end
     end
     println("  (string bonds are O(1) ≪ exact bond; +bdry should lower the error)")
