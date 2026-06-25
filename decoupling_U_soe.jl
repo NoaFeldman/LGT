@@ -71,23 +71,22 @@ function mpo_mult_c(A::CMPO, B::CMPO)
     return C
 end
 
-"""exp(−i O) as a CMPO via Jacobi–Anger; `a` ≥ spectral radius of O.  Bessel
-weights are precomputed by the stable recurrence and the term count adapts to a."""
-function expmi_mpo(O::CMPO, a::Float64; ε::Float64=1e-9, Dmax::Int=32)
+"""exp(−i O) as a CMPO by SCALING-AND-SQUARING with a Taylor inner series.
+Rescale so ‖O/2ˢ‖ < ½ (Taylor converges fast, no cancellation), then square s
+times (each squaring preserves unitarity).  Far more stable under MPO truncation
+than the Chebyshev three-term recurrence, which compounds compression errors."""
+function expmi_mpo(O::CMPO, a::Float64; ε::Float64=1e-9, Dmax::Int=32, Mtaylor::Int=16)
     dims = [size(Op, 3) for Op in O]
     (a < 1e-12 || !isfinite(a)) && return mpo_identity_c(dims)      # O ≈ 0 ⇒ 𝒰 = I
-    Kmax = min(2000, ceil(Int, 1.5 * a) + 60)                      # enough terms for this a
-    J = besselJ_all(Kmax, a)                                       # J[k+1] = J_k(a)
-    Hs = mpo_scale_c(1 / a, O); mpo_compress!(Hs; ε=ε, Dmax=Dmax)
-    Tprev = mpo_identity_c(dims); Tcur = Hs
-    U = mpo_axpby(J[1], Tprev, 2 * (-im) * J[2], Tcur)
-    mpo_compress!(U; ε=ε, Dmax=Dmax)
-    for k in 2:Kmax
-        HT = mpo_mult_c(Hs, Tcur); mpo_compress!(HT; ε=ε, Dmax=Dmax)
-        Tnext = mpo_axpby(2.0, HT, -1.0, Tprev); mpo_compress!(Tnext; ε=ε, Dmax=Dmax)
-        U = mpo_axpby(1.0, U, 2 * (-im)^k * J[k+1], Tnext); mpo_compress!(U; ε=ε, Dmax=Dmax)
-        Tprev, Tcur = Tcur, Tnext
-        (k > a && abs(J[k+1]) < ε) && break
+    s = max(0, ceil(Int, log2(2 * a)))                             # 2ˢ ≥ 2a ⇒ ‖O/2ˢ‖ ≤ ½
+    Os = mpo_scale_c(1 / 2.0^s, O); mpo_compress!(Os; ε=ε, Dmax=Dmax)
+    U = mpo_identity_c(dims); term = mpo_identity_c(dims)
+    for m in 1:Mtaylor                                             # exp(−iOs) = Σ (−iOs)ᵐ/m!
+        term = mpo_scale_c(-im / m, mpo_mult_c(Os, term)); mpo_compress!(term; ε=ε, Dmax=Dmax)
+        U = mpo_axpby(1.0, U, 1.0, term); mpo_compress!(U; ε=ε, Dmax=Dmax)
+    end
+    for _ in 1:s                                                   # square s times
+        U = mpo_mult_c(U, U); mpo_compress!(U; ε=ε, Dmax=Dmax)
     end
     return U
 end
