@@ -75,7 +75,7 @@ end
 Rescale so ‖O/2ˢ‖ < ½ (Taylor converges fast, no cancellation), then square s
 times (each squaring preserves unitarity).  Far more stable under MPO truncation
 than the Chebyshev three-term recurrence, which compounds compression errors."""
-function expmi_mpo(O::CMPO, a::Float64; ε::Float64=1e-9, Dmax::Int=32, Mtaylor::Int=16)
+function expmi_mpo(O::CMPO, a::Float64; ε::Float64=1e-9, Dmax::Int=16, Mtaylor::Int=16)
     dims = [size(Op, 3) for Op in O]
     (a < 1e-12 || !isfinite(a)) && return mpo_identity_c(dims)      # O ≈ 0 ⇒ 𝒰 = I
     s = max(0, ceil(Int, log2(2 * a)))                             # 2ˢ ≥ 2a ⇒ ‖O/2ˢ‖ ≤ ½
@@ -198,7 +198,7 @@ Returns the decoupling unitary as a LIST of CMPO factors
 single screened-string unitary (low bond); `𝒰_bdry` folds the exact field back
 in within `bw` sites of the boundary."""
 function build_decoupling_U_soe(nx::Int, ny::Int; dg::Int=1, K::Int=10, bw::Int=1,
-                                Dmax::Int=32, Nx_ref::Int=8, Ny_ref::Int=8,
+                                Dmax::Int=16, Nx_ref::Int=8, Ny_ref::Int=8,
                                 a_max::Float64=50.0)
     @assert dg == 1
     _, pos = column_snake(nx, ny)
@@ -275,7 +275,7 @@ function apply_U(factors::Vector{CMPO}, ψ::CMPS; Dmax::Int=64, ε::Float64=1e-1
 end
 
 """Multiply the factor list into a single CMPO (for dense checks / small N)."""
-function fold_factors(factors::Vector{CMPO}; Dmax::Int=64, ε::Float64=1e-10)
+function fold_factors(factors::Vector{CMPO}; Dmax::Int=24, ε::Float64=1e-10)
     U = factors[1]
     for k in 2:length(factors)
         U = mpo_mult_c(factors[k], U); mpo_compress!(U; ε=ε, Dmax=Dmax)
@@ -302,7 +302,7 @@ function validate_U_soe(; nx::Int=2, ny::Int=2, Ks=(1, 2, 3), bw::Int=1)
     _, Gt = generate_greens_function(nx, ny)
     Oex, Mabs_ex = build_O(nx, ny, 1, pos, dims,
                            (ix, iy, dir, jx, jy) -> shift_exact(Gt, ix, iy, dir, jx, jy))
-    Uex = expmi_mpo(Oex, _spectral_bound(Mabs_ex); Dmax=64)
+    Uex = expmi_mpo(Oex, _spectral_bound(Mabs_ex); Dmax=24)
     Uex_d = mpo_to_dense(Uex)
     @printf("  exact-M decoupler bond = %d\n", maximum(size(W, 2) for W in Uex))
 
@@ -312,7 +312,7 @@ function validate_U_soe(; nx::Int=2, ny::Int=2, Ks=(1, 2, 3), bw::Int=1)
         has_bd  = info.bdry_bond > 0
         for (tag, fac) in (("no-bdry", strings), ("+bdry", has_bd ? factors : strings))
             isempty(fac) && (@printf("  K=%-2d %-8s: no stable channels\n", K, tag); continue)
-            Ud = mpo_to_dense(fold_factors(fac; Dmax=128))
+            Ud = mpo_to_dense(fold_factors(fac))
             uni = opnorm(Ud' * Ud - I); err = opnorm(Ud - Uex_d)
             sb = info.n_string > 0 ? maximum(info.bonds[1:info.n_string]) : 0
             @printf("  K=%-2d %-8s: strings=%d  ‖𝒰−𝒰_exact‖=%.2e  ‖𝒰†𝒰−I‖=%.2e  max string bond=%d\n",
