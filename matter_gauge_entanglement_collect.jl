@@ -38,12 +38,12 @@ CSV.write(out_csv, df)
 println("Saved: $out_csv\n")
 
 # ── console table ─────────────────────────────────────────────────────────────
-@printf("  %-5s %-5s | %-10s %-10s | %-8s %-9s | %-9s %-6s\n",
-        "m", "g", "S_matter", "S_gauge", "purity", "srcfree", "ΔE/|E|", "bond")
-println("  " * "─"^78)
+@printf("  %-5s %-5s | %-9s %-9s %-9s | %-8s %-9s | %-9s\n",
+        "m", "g", "S_pre", "S_matter", "S_gauge", "purity", "srcfree", "ΔE/|E|")
+println("  " * "─"^80)
 for r in eachrow(df)
-    @printf("  %-5.2f %-5.2f | %-10.5f %-10.5f | %-8.4f %-9.4f | %-9.1e %-6d\n",
-            r.m, r.g, r.S_matter, r.S_gauge, r.purity, r.srcfree_weight, r.dE_rel, r.bond)
+    @printf("  %-5.2f %-5.2f | %-9.5f %-9.5f %-9.5f | %-8.4f %-9.4f | %-9.1e\n",
+            r.m, r.g, r.S_pre, r.S_matter, r.S_gauge, r.purity, r.srcfree_weight, r.dE_rel)
 end
 @printf("\n  worst ΔE/|E| = %.2e   min srcfree weight = %.4f   min purity = %.4f\n",
         maximum(df.dE_rel), minimum(df.srcfree_weight), minimum(df.purity))
@@ -52,13 +52,16 @@ end
 ms   = unique(df.m)
 cols = [:steelblue, :darkorange, :seagreen, :purple]
 
-p1 = plot(title="(a) Matter half-system entanglement", xlabel="g", ylabel="S_matter (nats)")
-p2 = plot(title="(b) Gauge dual-plaquette half-system entanglement", xlabel="g", ylabel="S_gauge (nats)")
+p1 = plot(title="(a) Matter half-system entanglement", xlabel="g", ylabel="S (nats)")
+p2 = plot(title="(b) Gauge dual-plaquette half-system entanglement", xlabel="g", ylabel="S (nats)")
 p3 = plot(title="(c) Plaquette purity (decoupling quality)", xlabel="g", ylabel="leading ρ_plaq eigenvalue")
 p4 = plot(title="(d) Source-free weight (decoupling quality)", xlabel="g", ylabel="tr ρ")
 for (i, mval) in enumerate(ms)
     sub = sort(df[df.m .== mval, :], :g)
     c = cols[mod1(i, length(cols))]
+    # dashed grey-toned reference: the standard pre-decoupling full-state entanglement
+    plot!(p1, sub.g, sub.S_pre, label="m=$mval (pre)", color=c, ls=:dash, marker=:utriangle, alpha=0.6)
+    plot!(p2, sub.g, sub.S_pre, label="m=$mval (pre)", color=c, ls=:dash, marker=:utriangle, alpha=0.6)
     plot!(p1, sub.g, sub.S_matter,        label="m=$mval", color=c, marker=:circle)
     plot!(p2, sub.g, sub.S_gauge,         label="m=$mval", color=c, marker=:diamond)
     plot!(p3, sub.g, sub.purity,          label="m=$mval", color=c, marker=:circle)

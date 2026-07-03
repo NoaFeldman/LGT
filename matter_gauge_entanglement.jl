@@ -226,6 +226,10 @@ function run_one(task_id::Int)
     @printf("  [MPS] E = %.8f  bond=%d  Gauss-viol=%.2e  ΔE/|E|=%.2e  (%.1fs)\n",
             Emps, bond, viol, abs(Emps - Eed) / max(abs(Eed), 1e-12), time()-t1)
 
+    # standard (pre-decoupling) half-system entanglement of the full GS MPS
+    S_pre = half_chain_entropy(ψ)
+    @printf("  [ENT] S_pre (undecoupled full state) = %.6f nats\n", S_pre)
+
     # ── 2. decouple matter from gauge:  φ = 𝒰|ψ⟩ ──────────────────────────────
     println("  [DEC] Bender–Zohar SoE decoupling ...")
     t2 = time()
@@ -259,7 +263,7 @@ function run_one(task_id::Int)
         task=[task_id], m=[m], g=[g],
         E_ed=[Eed], E_mps=[Emps], dE_rel=[abs(Emps - Eed) / max(abs(Eed), 1e-12)],
         gauss_viol=[viol], bond=[bond],
-        S_matter=[S_matter], S_gauge=[S_gauge],
+        S_pre=[S_pre], S_matter=[S_matter], S_gauge=[S_gauge],
         purity=[purity], srcfree_weight=[srcfree_weight],
         Nplaq=[Nplaq], best_config=[best_c],
     )
