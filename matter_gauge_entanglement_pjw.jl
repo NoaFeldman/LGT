@@ -42,7 +42,14 @@ ENV["GKSwstype"] = "nul"
 # (its `run_one` is guarded by @__FILE__ and does NOT auto-run on include)
 include(joinpath(@__DIR__, "matter_gauge_entanglement.jl"))
 
-using Printf, LinearAlgebra, CSV, DataFrames
+using Printf, LinearAlgebra, CSV, DataFrames, Random
+
+# The magnetic plaquette term makes the DMRG landscape rugged (the staggered
+# electric-vacuum start traps 2-site DMRG), so use a larger bond, more sweeps,
+# and several starts — keeping the lowest IN-SECTOR result.
+const PJW_D     = 100      # DMRG bond (base model used 40; plaquette flux needs more)
+const PJW_NSW   = 30       # max sweeps
+const PJW_NRAND = 4        # random full-bond restarts in addition to the staggered start
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  Hamiltonian with magnetic plaquette + Jordan–Wigner strings (column snake)║
@@ -125,23 +132,59 @@ function build_penalized_H_plaqjw_cs(nx, ny, dg; g, t, m, gauss_g, Λ, ε::Float
 end
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  Robust ground state: multi-start DMRG, keep the lowest in-sector result    ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+"""
+    robust_ground_state(Hpen, dims, nx, ny, dg, gch; D, nsweeps, n_rand) → (E, ψ, viol)
+
+DMRG from several initial states (the in-sector staggered product plus `n_rand`
+random full-bond MPS) to avoid the local minima the plaquette term creates.
+Returns the LOWEST-energy state that is in the target Gauss sector (Gauss
+violation < 1e-3); if none reach the sector, the overall lowest is returned."""
+function robust_ground_state(Hpen::CMPO, dims::Vector{Int}, nx, ny, dg,
+                             gch::AbstractMatrix; D::Int, nsweeps::Int,
+                             n_rand::Int=PJW_NRAND, verbose::Bool=true)
+    cands = Tuple{Float64,CMPS,Float64}[]
+    function push_cand!(ψ0, seed)
+        E, ψ = dmrg_ground_state(Hpen, dims; D=D, nsweeps=nsweeps, verbose=false,
+                                 ψ0=ψ0, seed=seed)
+        push!(cands, (E, ψ, gauss_violation_cs(ψ, nx, ny, dg, gch)))
+    end
+    push_cand!(staggered_mps_cs(nx, ny, dg), 1)      # in-sector product (electric vacuum)
+    for k in 1:n_rand
+        push_cand!(nothing, 10k + 1)                 # random full-bond MPS restarts
+    end
+    insec = [i for i in eachindex(cands) if cands[i][3] < 1e-3]
+    pool  = isempty(insec) ? collect(eachindex(cands)) : insec
+    best  = pool[argmin([cands[i][1] for i in pool])]
+    if verbose
+        for i in eachindex(cands)
+            @printf("    start %d: E_pen=%.8f  Gauss-viol=%.2e%s\n",
+                    i, cands[i][1], cands[i][3], i == best ? "   *" : "")
+        end
+    end
+    return cands[best][1], cands[best][2], cands[best][3]
+end
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  Dense self-test: DMRG(penalized) vs exact diagonalisation of the MPO      ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
 """Validate the plaquette+JW MPO on a small lattice by comparing the penalized
 DMRG ground-state energy to the lowest eigenvalue of the densely-contracted MPO."""
 function selftest_plaqjw(; nx::Int=2, ny::Int=2, dg::Int=1, g::Float64=1.0,
-                         t::Float64=1.0, m::Float64=0.5, Λ::Float64=20.0, D::Int=60)
+                         t::Float64=1.0, m::Float64=0.5, Λ::Float64=20.0, D::Int=200)
     println("─── plaquette+JW MPO self-test ($(nx)×$(ny), g=$g, t=$t, m=$m) ───")
     dims = col_node_dims(nx, ny, dg)
     gch  = staggered_charges(nx, ny)
     Hpen = build_penalized_H_plaqjw_cs(nx, ny, dg; g=g, t=t, m=m, gauss_g=gch, Λ=Λ)
     ND   = prod(dims)
-    @printf("  Hilbert dim = %d   penalized-H MPO max bond = %d\n",
-            ND, maximum(size(W, 2) for W in Hpen))
+    @printf("  Hilbert dim = %d   penalized-H MPO max bond = %d   (DMRG D=%d)\n",
+            ND, maximum(size(W, 2) for W in Hpen), D)
 
-    Edmrg, ψ = dmrg_ground_state(Hpen, dims; D=D, nsweeps=10, verbose=true,
-                                 ψ0=staggered_mps_cs(nx, ny, dg))
+    Edmrg, ψ, _ = robust_ground_state(Hpen, dims, nx, ny, dg, gch;
+                                      D=D, nsweeps=40, n_rand=6)
     Hbare = _assemble_mpo(dims, lgt_terms_plaqjw_cs(nx, ny, dg; g=g, t=t, m=m))
     Ebare = real(mpo_expect(Hbare, ψ)) / real(mps_overlap(ψ, ψ))
     viol  = gauss_violation_cs(ψ, nx, ny, dg, gch)
@@ -177,15 +220,14 @@ function run_one_pjw(task_id::Int)
     flush(stdout)
 
     # ── 1. column-snake DMRG ground state of the plaquette+JW Hamiltonian ─────
-    println("  [MPS] DMRG on the column snake (plaquette + JW) ...")
+    println("  [MPS] multi-start DMRG on the column snake (plaquette + JW) ...")
     dims = col_node_dims(nx, ny, dg)
     Hpen = build_penalized_H_plaqjw_cs(nx, ny, dg; g=g, t=B_THOP, m=m, gauss_g=gch, Λ=B_LAM)
     t1 = time()
-    _, ψ = dmrg_ground_state(Hpen, dims; D=B_DMPS, nsweeps=B_NSW, verbose=true,
-                             ψ0=staggered_mps_cs(nx, ny, dg))
+    _, ψ, viol = robust_ground_state(Hpen, dims, nx, ny, dg, gch;
+                                     D=PJW_D, nsweeps=PJW_NSW, n_rand=PJW_NRAND)
     Hbare = _assemble_mpo(dims, lgt_terms_plaqjw_cs(nx, ny, dg; g=g, t=B_THOP, m=m))
     Emps  = real(mpo_expect(Hbare, ψ)) / real(mps_overlap(ψ, ψ))
-    viol  = gauss_violation_cs(ψ, nx, ny, dg, gch)
     bond  = maximum(size(t, 2) for t in ψ)
     @printf("  [MPS] E = %.8f  bond=%d  Gauss-viol=%.2e  (%.1fs)\n",
             Emps, bond, viol, time()-t1)
