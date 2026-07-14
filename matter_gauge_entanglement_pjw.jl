@@ -44,12 +44,21 @@ include(joinpath(@__DIR__, "matter_gauge_entanglement.jl"))
 
 using Printf, LinearAlgebra, CSV, DataFrames, Random
 
-# The magnetic plaquette term makes the DMRG landscape rugged (the staggered
-# electric-vacuum start traps 2-site DMRG), so use a larger bond, more sweeps,
-# and several starts — keeping the lowest IN-SECTOR result.
-const PJW_D     = 100      # DMRG bond (base model used 40; plaquette flux needs more)
-const PJW_NSW   = 30       # max sweeps
-const PJW_NRAND = 4        # random full-bond restarts in addition to the staggered start
+# The magnetic plaquette term makes the DMRG landscape rugged: the staggered
+# start is the electric VACUUM, which traps 2-site DMRG because the plaquette
+# term needs magnetic flux to act on.  Timing (diag_pjw_timing.jl) showed the
+# cost is the local eigensolver on the d=18 sites, NOT the MPS bond (D=60 ≈ D=100),
+# and that random full-bond restarts were what blew the runtime to 48h.  So we
+# restart instead from cheap, low-bond, IN-SECTOR *flux-seeded* product states
+# (staggered fermions + random source-free plaquette loops), and trim the solver.
+const PJW_D     = 60       # DMRG bond (D=60 already matches D=100 on the 3×4 energy)
+const PJW_NSW   = 10       # max sweeps (staggered start converges in ~1–2; early-stops)
+const PJW_NFLUX = 4        # flux-seeded restarts in addition to the staggered start
+# cheaper local eigensolver (the per-sweep bottleneck): fewer Lanczos restarts
+const PJW_ETOL  = 1e-6
+const PJW_KTOL  = 1e-6
+const PJW_KMAXIT = 20
+const PJW_KDIM   = 10
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  Hamiltonian with magnetic plaquette + Jordan–Wigner strings (column snake)║
@@ -135,33 +144,64 @@ end
 # ║  Robust ground state: multi-start DMRG, keep the lowest in-sector result    ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
 
-"""
-    robust_ground_state(Hpen, dims, nx, ny, dg, gch; D, nsweeps, n_rand) → (E, ψ, viol)
+"""Cheap in-sector product start carrying magnetic flux: staggered fermions plus
+a random set of source-free plaquette loops (a random height config → curl → link
+E-field).  Being source-free, it stays in the staggered charge sector, and being
+a product state it keeps early DMRG sweeps cheap — unlike a random full-bond MPS."""
+function flux_seeded_mps(nx, ny, dg; seed::Int)
+    Random.seed!(seed)
+    chain, _ = column_snake(nx, ny)
+    dims  = col_node_dims(nx, ny, dg)
+    plaqs = plaquette_list(nx, ny)
+    h = zeros(Int, nx - 1, ny - 1)
+    for (px, py) in plaqs
+        h[px, py] = rand(Bool) ? 1 : 0
+    end
+    ER, EU = height_to_E(h, nx, ny)                  # curl of the heights → link fields
+    cfg = Int[]
+    for (ix, iy) in chain
+        _, d_gR, d_gU = site_dims(ix, iy, nx, ny, dg)
+        nf = isodd(ix + iy) ? 1 : 0
+        eR = ix < nx ? ER[ix, iy] : 0
+        eU = iy < ny ? EU[ix, iy] : 0
+        push!(cfg, site_idx(nf, eR, eU, d_gR, d_gU, dg))
+    end
+    return product_mps(cfg, dims)
+end
 
-DMRG from several initial states (the in-sector staggered product plus `n_rand`
-random full-bond MPS) to avoid the local minima the plaquette term creates.
-Returns the LOWEST-energy state that is in the target Gauss sector (Gauss
-violation < 1e-3); if none reach the sector, the overall lowest is returned."""
+"""
+    robust_ground_state(Hpen, dims, nx, ny, dg, gch; D, nsweeps, n_flux) → (E, ψ, viol)
+
+DMRG from several cheap, in-sector product starts — the staggered (electric-
+vacuum) state plus `n_flux` flux-seeded states — to escape the local minima the
+plaquette term creates without paying for random full-bond restarts.  Returns the
+LOWEST-energy state in the target Gauss sector (violation < 1e-3); if none reach
+the sector, the overall lowest is returned.  Per-start energy/time is logged."""
 function robust_ground_state(Hpen::CMPO, dims::Vector{Int}, nx, ny, dg,
                              gch::AbstractMatrix; D::Int, nsweeps::Int,
-                             n_rand::Int=PJW_NRAND, verbose::Bool=true)
+                             n_flux::Int=PJW_NFLUX, verbose::Bool=true)
     cands = Tuple{Float64,CMPS,Float64}[]
-    function push_cand!(ψ0, seed)
-        E, ψ = dmrg_ground_state(Hpen, dims; D=D, nsweeps=nsweeps, verbose=false,
-                                 ψ0=ψ0, seed=seed)
+    function push_cand!(ψ0)
+        t0 = time()
+        E, ψ = dmrg_ground_state(Hpen, dims; D=D, nsweeps=nsweeps, verbose=false, ψ0=ψ0,
+                                 tol=PJW_KTOL, maxiter=PJW_KMAXIT, krylovdim=PJW_KDIM,
+                                 etol=PJW_ETOL)
         push!(cands, (E, ψ, gauss_violation_cs(ψ, nx, ny, dg, gch)))
+        return time() - t0
     end
-    push_cand!(staggered_mps_cs(nx, ny, dg), 1)      # in-sector product (electric vacuum)
-    for k in 1:n_rand
-        push_cand!(nothing, 10k + 1)                 # random full-bond MPS restarts
+    dt = Float64[]
+    push!(dt, push_cand!(staggered_mps_cs(nx, ny, dg)))          # electric-vacuum start
+    for k in 1:n_flux
+        push!(dt, push_cand!(flux_seeded_mps(nx, ny, dg; seed=10k + 1)))  # flux-seeded starts
     end
     insec = [i for i in eachindex(cands) if cands[i][3] < 1e-3]
     pool  = isempty(insec) ? collect(eachindex(cands)) : insec
     best  = pool[argmin([cands[i][1] for i in pool])]
     if verbose
         for i in eachindex(cands)
-            @printf("    start %d: E_pen=%.8f  Gauss-viol=%.2e%s\n",
-                    i, cands[i][1], cands[i][3], i == best ? "   *" : "")
+            @printf("    start %d (%s): E_pen=%.8f  Gauss-viol=%.2e  %5.0fs%s\n",
+                    i, i == 1 ? "vacuum" : "flux", cands[i][1], cands[i][3], dt[i],
+                    i == best ? "   *" : "")
         end
     end
     return cands[best][1], cands[best][2], cands[best][3]
@@ -184,7 +224,7 @@ function selftest_plaqjw(; nx::Int=2, ny::Int=2, dg::Int=1, g::Float64=1.0,
             ND, maximum(size(W, 2) for W in Hpen), D)
 
     Edmrg, ψ, _ = robust_ground_state(Hpen, dims, nx, ny, dg, gch;
-                                      D=D, nsweeps=40, n_rand=6)
+                                      D=D, nsweeps=20, n_flux=6)
     Hbare = _assemble_mpo(dims, lgt_terms_plaqjw_cs(nx, ny, dg; g=g, t=t, m=m))
     Ebare = real(mpo_expect(Hbare, ψ)) / real(mps_overlap(ψ, ψ))
     viol  = gauss_violation_cs(ψ, nx, ny, dg, gch)
@@ -225,7 +265,7 @@ function run_one_pjw(task_id::Int)
     Hpen = build_penalized_H_plaqjw_cs(nx, ny, dg; g=g, t=B_THOP, m=m, gauss_g=gch, Λ=B_LAM)
     t1 = time()
     _, ψ, viol = robust_ground_state(Hpen, dims, nx, ny, dg, gch;
-                                     D=PJW_D, nsweeps=PJW_NSW, n_rand=PJW_NRAND)
+                                     D=PJW_D, nsweeps=PJW_NSW, n_flux=PJW_NFLUX)
     Hbare = _assemble_mpo(dims, lgt_terms_plaqjw_cs(nx, ny, dg; g=g, t=B_THOP, m=m))
     Emps  = real(mpo_expect(Hbare, ψ)) / real(mps_overlap(ψ, ψ))
     bond  = maximum(size(t, 2) for t in ψ)
