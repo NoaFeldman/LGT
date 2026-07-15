@@ -20,7 +20,7 @@
 #SBATCH --array=1-9
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=16G
+#SBATCH --mem=64G
 #SBATCH --time=08:00:00
 #SBATCH --partition=main
 

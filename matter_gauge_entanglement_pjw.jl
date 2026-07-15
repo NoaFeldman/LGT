@@ -269,21 +269,23 @@ function run_one_pjw(task_id::Int)
     Hbare = _assemble_mpo(dims, lgt_terms_plaqjw_cs(nx, ny, dg; g=g, t=B_THOP, m=m))
     Emps  = real(mpo_expect(Hbare, ψ)) / real(mps_overlap(ψ, ψ))
     bond  = maximum(size(t, 2) for t in ψ)
-    @printf("  [MPS] E = %.8f  bond=%d  Gauss-viol=%.2e  (%.1fs)\n",
-            Emps, bond, viol, time()-t1)
+    @printf("  [MPS] E = %.8f  bond=%d  Gauss-viol=%.2e  (%.1fs)  peak RSS=%.1f GB\n",
+            Emps, bond, viol, time()-t1, Sys.maxrss()/2^30)
+    flush(stdout)
 
     # standard (pre-decoupling) half-system entanglement of the full GS MPS
     S_pre = half_chain_entropy(ψ)
     @printf("  [ENT] S_pre (undecoupled full state) = %.6f nats\n", S_pre)
 
     # ── 2. decouple matter from gauge:  φ = 𝒰|ψ⟩ ──────────────────────────────
-    println("  [DEC] Bender–Zohar SoE decoupling ...")
+    println("  [DEC] Bender–Zohar SoE decoupling ..."); flush(stdout)
     t2 = time()
     Ex = build_exponents(nx, ny; dg=dg, K=B_K, bw=B_BW)
     φ  = decouple_state(Ex.Ofull, Ex.a_full, ψ; Dmax=B_DMAX)
-    @printf("  [DEC] Ô bond=%d   ‖𝒰ψ‖/‖ψ‖−1=%.2e   (%.1fs)\n",
+    @printf("  [DEC] Ô bond=%d   ‖𝒰ψ‖/‖ψ‖−1=%.2e   (%.1fs)  peak RSS=%.1f GB\n",
             maximum(size(W, 2) for W in Ex.Ofull),
-            abs(mps_norm(φ) / mps_norm(ψ) - 1), time()-t2)
+            abs(mps_norm(φ) / mps_norm(ψ) - 1), time()-t2, Sys.maxrss()/2^30)
+    flush(stdout)
 
     # ── 3a. gauge: dual-plaquette half-system entanglement ────────────────────
     ρ, plaqs, srcfree_weight = plaquette_density_matrix(φ, nx, ny; dg=dg)
@@ -301,8 +303,8 @@ function run_one_pjw(task_id::Int)
     ψm = project_matter(φ, nx, ny, dg, chain, ERb, EUb)
     S_matter = half_chain_entropy(ψm)
 
-    @printf("  [ENT] S_matter = %.6f  S_gauge = %.6f  (nats)   purity=%.4f srcfree=%.4f\n",
-            S_matter, S_gauge, purity, srcfree_weight)
+    @printf("  [ENT] S_matter = %.6f  S_gauge = %.6f  (nats)   purity=%.4f srcfree=%.4f  peak RSS=%.1f GB\n",
+            S_matter, S_gauge, purity, srcfree_weight, Sys.maxrss()/2^30)
 
     df = DataFrame(
         task=[task_id], m=[m], g=[g],
