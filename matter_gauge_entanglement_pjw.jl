@@ -52,13 +52,12 @@ using Printf, LinearAlgebra, CSV, DataFrames, Random
 # restart instead from cheap, low-bond, IN-SECTOR *flux-seeded* product states
 # (staggered fermions + random source-free plaquette loops), and trim the solver.
 const PJW_D     = 60       # DMRG bond (D=60 already matches D=100 on the 3×4 energy)
-const PJW_NSW   = 10       # max sweeps (staggered start converges in ~1–2; early-stops)
+const PJW_NSW   = 6        # max sweeps (vacuum start converges in ~1–2; early-stops)
 const PJW_NFLUX = 4        # flux-seeded restarts in addition to the staggered start
-# cheaper local eigensolver (the per-sweep bottleneck): fewer Lanczos restarts
-const PJW_ETOL  = 1e-6
-const PJW_KTOL  = 1e-6
-const PJW_KMAXIT = 20
-const PJW_KDIM   = 10
+# NOTE: the local eigensolver uses dmrg_ground_state's DEFAULT settings
+# (tol=1e-7, maxiter=60, krylovdim=12).  A custom "cheaper" set (krylovdim=10,
+# maxiter=20) was tried and made a single sweep 50×+ SLOWER — a too-small Krylov
+# subspace fails to converge and thrashes through restarts.  Do not shrink it.
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  Hamiltonian with magnetic plaquette + Jordan–Wigner strings (column snake)║
@@ -183,9 +182,7 @@ function robust_ground_state(Hpen::CMPO, dims::Vector{Int}, nx, ny, dg,
     cands = Tuple{Float64,CMPS,Float64}[]
     function push_cand!(ψ0)
         t0 = time()
-        E, ψ = dmrg_ground_state(Hpen, dims; D=D, nsweeps=nsweeps, verbose=false, ψ0=ψ0,
-                                 tol=PJW_KTOL, maxiter=PJW_KMAXIT, krylovdim=PJW_KDIM,
-                                 etol=PJW_ETOL)
+        E, ψ = dmrg_ground_state(Hpen, dims; D=D, nsweeps=nsweeps, verbose=false, ψ0=ψ0)
         push!(cands, (E, ψ, gauss_violation_cs(ψ, nx, ny, dg, gch)))
         return time() - t0
     end
