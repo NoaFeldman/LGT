@@ -51,13 +51,24 @@ using Printf, LinearAlgebra, CSV, DataFrames, Random
 # and that random full-bond restarts were what blew the runtime to 48h.  So we
 # restart instead from cheap, low-bond, IN-SECTOR *flux-seeded* product states
 # (staggered fermions + random source-free plaquette loops), and trim the solver.
-const PJW_D     = 60       # DMRG bond (D=60 already matches D=100 on the 3×4 energy)
-const PJW_NSW   = 6        # max sweeps (vacuum start converges in ~1–2; early-stops)
-const PJW_NFLUX = 4        # flux-seeded restarts in addition to the staggered start
+const PJW_D     = 60       # (self-test only) fixed-bond multi-start reference
+const PJW_NSW   = 6
+const PJW_NFLUX = 4
 # NOTE: the local eigensolver uses dmrg_ground_state's DEFAULT settings
 # (tol=1e-7, maxiter=60, krylovdim=12).  A custom "cheaper" set (krylovdim=10,
 # maxiter=20) was tried and made a single sweep 50×+ SLOWER — a too-small Krylov
 # subspace fails to converge and thrashes through restarts.  Do not shrink it.
+
+# ── Production ground state (diag_pjw_basin.jl showed why) ────────────────────
+# The plaquette+JW ground state is HIGHLY entangled: from the electric-vacuum
+# start the energy keeps plunging for many sweeps as flux builds, and a full-bond
+# (D=60) sweep costs ~75 min.  So: (1) BOND-RAMP — warm up cheaply at low bond,
+# then refine at high bond (the expensive sweeps then converge in a few iters);
+# (2) a STRONGER Gauss penalty — the plaquette coefficient 1/2g² reaches 8 at
+# g=0.25, so Λ=5 need not hold the staggered sector; Λ must dominate it.
+const PJW_LAM      = 30.0
+const PJW_ETOL     = 1e-5
+const PJW_SCHEDULE = [(20, 5), (40, 4), (60, 8)]   # (bond, max sweeps) per ramp stage
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  Hamiltonian with magnetic plaquette + Jordan–Wigner strings (column snake)║
@@ -204,6 +215,41 @@ function robust_ground_state(Hpen::CMPO, dims::Vector{Int}, nx, ny, dg,
     return cands[best][1], cands[best][2], cands[best][3]
 end
 
+"""
+    ramped_ground_state(Hpen, dims, nx, ny, dg, gch; schedule, etol, ψ0, verbose)
+        → (E, ψ, viol)
+
+Bond-ramping DMRG: run single sweeps at each `(D, max_sweeps)` stage of
+`schedule`, feeding the state forward, so cheap low-bond sweeps build the flux
+before the expensive high-bond sweeps refine it.  Per-sweep energy, ΔE, Gauss
+violation, bond, wall time and peak RSS are printed (flushed — a timeout leaves
+the trace).  Early-stops within the FINAL (largest-bond) stage once |ΔE|<etol."""
+function ramped_ground_state(Hpen::CMPO, dims::Vector{Int}, nx, ny, dg,
+                             gch::AbstractMatrix; schedule=PJW_SCHEDULE,
+                             etol::Float64=PJW_ETOL, ψ0::Union{Nothing,CMPS}=nothing,
+                             verbose::Bool=true)
+    ψ = ψ0 === nothing ? staggered_mps_cs(nx, ny, dg) : deepcopy(ψ0)
+    Dmax = schedule[end][1]
+    E = Inf; viol = Inf
+    for (D, nsw) in schedule
+        for s in 1:nsw
+            t0 = time()
+            E2, ψ = dmrg_ground_state(Hpen, dims; D=D, nsweeps=1, verbose=false, ψ0=ψ)
+            viol = gauss_violation_cs(ψ, nx, ny, dg, gch)
+            bond = maximum(size(t, 2) for t in ψ)
+            if verbose
+                @printf("    D=%-3d sweep %d: E=%.8f  ΔE=%.2e  Gauss-viol=%.2e  bond=%d  %6.0fs  RSS=%.1f GB\n",
+                        D, s, E2, abs(E2 - E), viol, bond, time()-t0, Sys.maxrss()/2^30)
+                flush(stdout)
+            end
+            converged = abs(E2 - E) < etol
+            E = E2
+            (converged && D == Dmax) && (verbose && println("    → converged at max bond"); return E, ψ, viol)
+        end
+    end
+    return E, ψ, viol
+end
+
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  Dense self-test: DMRG(penalized) vs exact diagonalisation of the MPO      ║
 # ╚═══════════════════════════════════════════════════════════════════════════╝
@@ -256,13 +302,13 @@ function run_one_pjw(task_id::Int)
             task_id, m, g, nx, ny, dg)
     flush(stdout)
 
-    # ── 1. column-snake DMRG ground state of the plaquette+JW Hamiltonian ─────
-    println("  [MPS] multi-start DMRG on the column snake (plaquette + JW) ...")
+    # ── 1. column-snake bond-ramping DMRG ground state (plaquette + JW) ───────
+    println("  [MPS] bond-ramping DMRG on the column snake (plaquette + JW) ...")
     dims = col_node_dims(nx, ny, dg)
-    Hpen = build_penalized_H_plaqjw_cs(nx, ny, dg; g=g, t=B_THOP, m=m, gauss_g=gch, Λ=B_LAM)
+    Hpen = build_penalized_H_plaqjw_cs(nx, ny, dg; g=g, t=B_THOP, m=m, gauss_g=gch, Λ=PJW_LAM)
     t1 = time()
-    _, ψ, viol = robust_ground_state(Hpen, dims, nx, ny, dg, gch;
-                                     D=PJW_D, nsweeps=PJW_NSW, n_flux=PJW_NFLUX)
+    _, ψ, viol = ramped_ground_state(Hpen, dims, nx, ny, dg, gch;
+                                     schedule=PJW_SCHEDULE, etol=PJW_ETOL, verbose=true)
     Hbare = _assemble_mpo(dims, lgt_terms_plaqjw_cs(nx, ny, dg; g=g, t=B_THOP, m=m))
     Emps  = real(mpo_expect(Hbare, ψ)) / real(mps_overlap(ψ, ψ))
     bond  = maximum(size(t, 2) for t in ψ)

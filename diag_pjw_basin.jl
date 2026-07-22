@@ -1,18 +1,18 @@
 #= ═══════════════════════════════════════════════════════════════════════════════
    diag_pjw_basin.jl
 
-   Ground-truth cost + convergence of the plaquette+JW DMRG on 3×4.  The earlier
-   timing diagnostic under-measured: it ran ONE sweep from the bond-1 product
-   state (cheap, bonds still growing), whereas sweeps 2+ run at full bond where
-   the d=18 two-site eigensolve forms ~900 MB intermediates hundreds of times per
-   update → GC-bound and slow.
+   Validate the production ground-state strategy for the (highly entangled)
+   plaquette+JW model on 3×4: BOND-RAMPING DMRG from the electric-vacuum start
+   with the stronger Gauss penalty Λ=PJW_LAM.  Prints per sweep the energy, ΔE,
+   Gauss violation, bond, wall time and peak RSS (flushed — a timeout keeps the
+   trace), then reports the converged energy, whether it is in-sector, and the
+   pre-decoupling half-system entanglement.
 
-   This runs single sweeps ITERATIVELY (feeding ψ back), printing wall time,
-   energy, bond and peak RSS after EACH sweep (flushed, so a timeout still leaves
-   the numbers), at two bond dimensions — to answer:
-     • how long is a real full-bond sweep, and how many do we need to converge?
-     • is a small bond (D=30) enough (low-entanglement vacuum), i.e. can we cut the
-       per-sweep cost by ~(30/60)² ≈ 4× and the memory likewise?
+   Answers, from one (m,g) point:
+     • does ramping actually CONVERGE (ΔE→0 at D=60), and at what wall-clock cost?
+     • is the converged state IN the staggered sector (Gauss-viol ≈ 0)? — i.e. is
+       Λ=PJW_LAM strong enough now that the plaquette term is present?
+     • how entangled is it (S_pre) — sanity on why the bond is large.
 
    Usage:
        SLURM_ARRAY_TASK_ID=1 julia --project=. diag_pjw_basin.jl
@@ -25,24 +25,6 @@ include(joinpath(@__DIR__, "matter_gauge_entanglement_pjw.jl"))
 
 using Printf
 
-"""Run up to `nsw` single sweeps from `ψ0`, timing each; early-stop on |ΔE|<etol."""
-function sweep_by_sweep(tag, Hpen, dims, nx, ny, dg, gch, ψ0; D, nsw=6, etol=1e-6)
-    @printf("\n  ── %s : D=%d ─────────────────────────────────────────────\n", tag, D)
-    flush(stdout)
-    ψ = ψ0; Eprev = Inf
-    for s in 1:nsw
-        t0 = time()
-        E, ψ = dmrg_ground_state(Hpen, dims; D=D, nsweeps=1, verbose=false, ψ0=ψ)  # DEFAULT eigensolver
-        bond = maximum(size(t, 2) for t in ψ)
-        @printf("    sweep %d: E_pen=%.8f  ΔE=%.2e  bond=%d  %6.0fs  peak RSS=%.1f GB\n",
-                s, E, abs(E - Eprev), bond, time()-t0, Sys.maxrss()/2^30)
-        flush(stdout)
-        abs(E - Eprev) < etol && (println("    → converged"); return E, ψ)
-        Eprev = E
-    end
-    return Eprev, ψ
-end
-
 function basin(task_id::Int)
     idx = ((task_id - 1) % length(MG_GRID)) + 1
     p   = MG_GRID[idx]
@@ -51,21 +33,24 @@ function basin(task_id::Int)
     gch  = staggered_charges(nx, ny)
     dims = col_node_dims(nx, ny, dg)
 
-    @printf("=== basin diag task %d: m=%.2f g=%.2f  (%d×%d, plaquette+JW) ===\n", task_id, m, g, nx, ny)
-    Hpen = build_penalized_H_plaqjw_cs(nx, ny, dg; g=g, t=B_THOP, m=m, gauss_g=gch, Λ=B_LAM)
+    @printf("=== basin diag task %d: m=%.2f g=%.2f  (%d×%d, plaquette+JW, Λ=%.0f) ===\n",
+            task_id, m, g, nx, ny, PJW_LAM)
+    @printf("  schedule (bond,sweeps): %s\n", string(PJW_SCHEDULE))
+    Hpen = build_penalized_H_plaqjw_cs(nx, ny, dg; g=g, t=B_THOP, m=m, gauss_g=gch, Λ=PJW_LAM)
     @printf("  penalized-H MPO max bond = %d\n", maximum(size(W, 2) for W in Hpen)); flush(stdout)
 
-    # small bond first (cheap — tells us the per-sweep cost and if D=30 suffices)
-    E30, _ = sweep_by_sweep("vacuum", Hpen, dims, nx, ny, dg, gch,
-                            staggered_mps_cs(nx, ny, dg); D=30, nsw=6)
-    # then full bond, to see if the energy drops further (is D=30 enough?)
-    E60, _ = sweep_by_sweep("vacuum", Hpen, dims, nx, ny, dg, gch,
-                            staggered_mps_cs(nx, ny, dg); D=60, nsw=6)
+    t0 = time()
+    E, ψ, viol = ramped_ground_state(Hpen, dims, nx, ny, dg, gch;
+                                     schedule=PJW_SCHEDULE, etol=PJW_ETOL, verbose=true)
+    Hbare = _assemble_mpo(dims, lgt_terms_plaqjw_cs(nx, ny, dg; g=g, t=B_THOP, m=m))
+    Ebare = real(mpo_expect(Hbare, ψ)) / real(mps_overlap(ψ, ψ))
+    S_pre = half_chain_entropy(ψ)
 
     println("\n  ── summary ──")
-    @printf("  vacuum E(D=30) = %.8f   vacuum E(D=60) = %.8f   ΔE(D) = %.2e\n",
-            E30, E60, abs(E60 - E30))
-    println("  (use the per-sweep times above to size the production walltime / bond.)")
+    @printf("  E_pen=%.8f  E_bare=%.8f  Gauss-viol=%.2e  bond=%d  S_pre=%.4f nats  (%.0fs total)\n",
+            E, Ebare, viol, maximum(size(t, 2) for t in ψ), S_pre, time()-t0)
+    println(viol < 1e-3 ? "  IN-SECTOR ✓  — Λ holds the staggered sector." :
+                          "  OUT OF SECTOR ✗ — raise PJW_LAM (plaquette term is beating the penalty).")
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
