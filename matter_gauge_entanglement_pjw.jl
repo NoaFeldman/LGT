@@ -59,16 +59,20 @@ const PJW_NFLUX = 4
 # maxiter=20) was tried and made a single sweep 50×+ SLOWER — a too-small Krylov
 # subspace fails to converge and thrashes through restarts.  Do not shrink it.
 
-# ── Production ground state (diag_pjw_basin.jl showed why) ────────────────────
-# The plaquette+JW ground state is HIGHLY entangled: from the electric-vacuum
-# start the energy keeps plunging for many sweeps as flux builds, and a full-bond
-# (D=60) sweep costs ~75 min.  So: (1) BOND-RAMP — warm up cheaply at low bond,
-# then refine at high bond (the expensive sweeps then converge in a few iters);
-# (2) a STRONGER Gauss penalty — the plaquette coefficient 1/2g² reaches 8 at
-# g=0.25, so Λ=5 need not hold the staggered sector; Λ must dominate it.
+# ── Production ground state (diag_pjw_basin.jl, job 8493367, settled this) ────
+# The plaquette+JW ground state is HIGHLY entangled.  Validated on task 1:
+#   • BOND-RAMP (warm up cheap, refine high) converges cleanly — D=20 → ΔE~3e-6,
+#     D=40 → ΔE~2e-7.
+#   • STRONGER Gauss penalty Λ=30 holds the staggered sector (Gauss-viol ~1e-9);
+#     Λ=5 let the state LEAK out of sector (spurious lower bare energy).
+#   • D=40 vs D=60 changes the energy by only ~1e-4 relative, but a D=60 sweep
+#     costs ~3.3 h (≈25 h/point → over walltime).  So production ends at D=40:
+#     clean, in-sector, affordable; the entanglement is bond-limited at D=40
+#     (uniformly across points — fine for the comparison).  Raise the tail to
+#     (48,·)/(60,·) only if you need sub-1e-4 energies and can afford the hours.
 const PJW_LAM      = 30.0
 const PJW_ETOL     = 1e-5
-const PJW_SCHEDULE = [(20, 5), (40, 4), (60, 8)]   # (bond, max sweeps) per ramp stage
+const PJW_SCHEDULE = [(20, 5), (40, 6)]   # (bond, max sweeps) per ramp stage
 
 # ╔═══════════════════════════════════════════════════════════════════════════╗
 # ║  Hamiltonian with magnetic plaquette + Jordan–Wigner strings (column snake)║
